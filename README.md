@@ -1,21 +1,23 @@
-# Dashboard inflacji dla czynników Motor
+# Dashboard Inflacji Dla Czynników Motor
 
-Streamlit app that pulls Eurostat HICP annual-rate data and visualizes selected inflation factors for Poland, Germany, Austria, Greece, Estonia, Lithuania, and Latvia.
+Flask + Plotly app that pulls Eurostat HICP annual-rate data and visualizes selected inflation factors for Poland, Germany, Austria, Greece, Estonia, Lithuania, and Latvia.
 
 ## Run locally
 
 ```bash
 pip install -r requirements.txt
-streamlit run app.py
+flask --app app run
 ```
 
-## Deploy
+Then open `http://127.0.0.1:5000`.
 
-The simplest path is Streamlit Community Cloud:
+## Deploy On Vercel
+
+Vercel can deploy this as a Python Flask app.
 
 1. Push this folder to a GitHub repository.
-2. Create a new Streamlit app from that repository.
-3. Set the main file path to `app.py`.
+2. In Vercel, choose **Add New... > Project**.
+3. Import the GitHub repository.
 4. Deploy.
 
-No secrets are required. The app fetches public Eurostat data at runtime and caches results for one hour.
+No secrets are required. The app fetches public Eurostat data at runtime.
