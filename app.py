@@ -599,7 +599,6 @@ def index():
                     font-size: clamp(28px, 4vw, 44px);
                     letter-spacing: 0;
                 }}
-                .subtitle {{ margin: 0; color: var(--muted); }}
                 main {{
                     display: grid;
                     grid-template-columns: minmax(230px, 290px) minmax(0, 1fr);
@@ -796,8 +795,7 @@ def index():
         </head>
         <body>
             <header>
-                <h1>Motor Cost Inflation Dashboard</h1>
-                <p class="subtitle">Eurostat HICP data for the last 10 years.</p>
+                <h1>Global Claims CPI Dashboard</h1>
             </header>
             <main>
                 <aside>
@@ -837,6 +835,13 @@ def index():
                     loader.classList.add("is-active");
                     button.setAttribute("aria-busy", "true");
                     button.textContent = "Fetching...";
+                }});
+
+                window.addEventListener("load", () => {{
+                    const chartDataTable = document.querySelector(".data-table");
+                    if (chartDataTable) {{
+                        chartDataTable.scrollLeft = chartDataTable.scrollWidth;
+                    }}
                 }});
             </script>
         </body>
