@@ -258,7 +258,7 @@ def make_plot(chart_df, factor):
 
 
 def selected_countries_from_request():
-    selected = request.args.getlist("countries") or list(COUNTRIES.keys())
+    selected = request.args.getlist("countries") or ["Poland"]
     selected = [country for country in selected if country in COUNTRIES]
 
     one_country = request.args.get("view", "All selected countries")
@@ -630,7 +630,7 @@ def index():
                     vertical-align: top;
                 }}
                 table.dataframe th {{ background: var(--panel); }}
-                .data-table table.dataframe th {{
+                .data-table table.dataframe thead th {{
                     position: sticky;
                     top: 0;
                     z-index: 1;
@@ -648,6 +648,9 @@ def index():
                     background: #ffffff;
                     box-shadow: 1px 0 0 var(--line);
                 }}
+                .excel-table tbody .sticky-col {{
+                    top: auto;
+                }}
                 .excel-table thead .sticky-col {{
                     z-index: 3;
                     background: var(--panel);
@@ -655,10 +658,12 @@ def index():
                 .excel-table .country-col {{
                     left: 0;
                     min-width: 118px;
+                    width: 118px;
                 }}
                 .excel-table .factor-col {{
                     left: 118px;
                     min-width: 190px;
+                    width: 190px;
                 }}
                 @media (max-width: 860px) {{
                     main {{ grid-template-columns: 1fr; }}
@@ -693,11 +698,11 @@ def index():
                 </aside>
                 <div>
                     {metrics_html}
-                    {status_html}
                     {charts_html}
                     {data_table_html}
                     <h2>Latest Available Readings</h2>
                     <div class="table-wrap">{latest_html}</div>
+                    {status_html}
                 </div>
             </main>
             <script>
