@@ -297,6 +297,86 @@ def dataframe_html(df):
     return df.to_html(index=False, classes="dataframe", border=0, escape=True)
 
 
+def color_for_value(value, max_positive, min_negative):
+    if pd.isna(value):
+        return ""
+
+    if value >= 0:
+        if max_positive <= 0:
+            intensity = 0
+        else:
+            intensity = min(abs(value) / max_positive, 1)
+        red = 255
+        green = round(248 - (98 * intensity))
+        blue = round(248 - (98 * intensity))
+        return f"background-color: rgb({red}, {green}, {blue});"
+
+    if min_negative >= 0:
+        intensity = 0
+    else:
+        intensity = min(abs(value) / abs(min_negative), 1)
+    red = round(244 - (104 * intensity))
+    green = round(252 - (72 * intensity))
+    blue = round(246 - (88 * intensity))
+    return f"background-color: rgb({red}, {green}, {blue});"
+
+
+def pivot_chart_data_html(chart_df):
+    if chart_df.empty:
+        return '<p class="notice">No data available.</p>'
+
+    table_source = chart_df.copy()
+    table_source["month_label"] = table_source["date"].dt.strftime("%Y-%m")
+
+    pivot = table_source.pivot_table(
+        index=["country", "factor_label"],
+        columns="month_label",
+        values="value",
+        aggfunc="mean",
+    )
+
+    date_columns = sorted(pivot.columns)
+    pivot = pivot.reindex(columns=date_columns).sort_index()
+
+    values = pivot.to_numpy().ravel()
+    numeric_values = pd.Series(values).dropna()
+    positives = numeric_values[numeric_values >= 0]
+    negatives = numeric_values[numeric_values < 0]
+    max_positive = positives.max() if not positives.empty else 0
+    min_negative = negatives.min() if not negatives.empty else 0
+
+    rows = [
+        '<table class="dataframe excel-table">',
+        "<thead><tr>",
+        '<th class="sticky-col country-col">Country</th>',
+        '<th class="sticky-col factor-col">Factor</th>',
+    ]
+
+    for month in date_columns:
+        rows.append(f"<th>{escape(month)}</th>")
+
+    rows.append("</tr></thead><tbody>")
+
+    for (country, factor), row in pivot.iterrows():
+        rows.append("<tr>")
+        rows.append(f'<th class="sticky-col country-col">{escape(str(country))}</th>')
+        rows.append(f'<th class="sticky-col factor-col">{escape(str(factor))}</th>')
+
+        for month in date_columns:
+            value = row[month]
+            if pd.isna(value):
+                rows.append("<td></td>")
+                continue
+
+            style = color_for_value(value, max_positive, min_negative)
+            rows.append(f'<td style="{style}">{value:.2f}</td>')
+
+        rows.append("</tr>")
+
+    rows.append("</tbody></table>")
+    return "\n".join(rows)
+
+
 @app.route("/")
 def index():
     selected, one_country = selected_countries_from_request()
@@ -350,33 +430,9 @@ def index():
             charts_html = "\n".join(
                 f"<section>{make_plot(chart_df, factor)}</section>" for factor in FACTORS
             )
-            data_table = chart_df[
-                [
-                    "date",
-                    "country",
-                    "factor_label",
-                    "value",
-                    "n_indicators",
-                    "indicators",
-                    "coicops",
-                ]
-            ].assign(
-                date=lambda df: df["date"].dt.strftime("%Y-%m-%d"),
-                value=lambda df: df["value"].map(lambda value: f"{value:.2f}"),
-            ).rename(
-                columns={
-                    "date": "Date",
-                    "country": "Country",
-                    "factor_label": "Factor",
-                    "value": "Value",
-                    "n_indicators": "Indicators",
-                    "indicators": "Indicator names",
-                    "coicops": "COICOP",
-                }
-            )
             data_table_html = f"""
             <h2>Chart Data</h2>
-            <div class="table-wrap data-table">{dataframe_html(data_table)}</div>
+            <div class="table-wrap data-table">{pivot_chart_data_html(chart_df)}</div>
             """
             latest = (
                 chart_df.sort_values("date")
@@ -559,6 +615,9 @@ def index():
                     border: 1px solid var(--line);
                     border-radius: 8px;
                 }}
+                .excel-table {{
+                    min-width: max-content;
+                }}
                 table.dataframe {{
                     width: 100%;
                     border-collapse: collapse;
@@ -575,6 +634,31 @@ def index():
                     position: sticky;
                     top: 0;
                     z-index: 1;
+                }}
+                .excel-table th,
+                .excel-table td {{
+                    white-space: nowrap;
+                    min-width: 78px;
+                    text-align: right;
+                }}
+                .excel-table .sticky-col {{
+                    position: sticky;
+                    z-index: 2;
+                    text-align: left;
+                    background: #ffffff;
+                    box-shadow: 1px 0 0 var(--line);
+                }}
+                .excel-table thead .sticky-col {{
+                    z-index: 3;
+                    background: var(--panel);
+                }}
+                .excel-table .country-col {{
+                    left: 0;
+                    min-width: 118px;
+                }}
+                .excel-table .factor-col {{
+                    left: 118px;
+                    min-width: 190px;
                 }}
                 @media (max-width: 860px) {{
                     main {{ grid-template-columns: 1fr; }}
