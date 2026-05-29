@@ -1,7 +1,7 @@
 import functools
 import re
 import warnings
-from datetime import date
+from datetime import datetime
 from html import escape
 
 import eurostat
@@ -87,7 +87,9 @@ def is_time_column(col):
     value = str(col)
     return bool(
         re.match(r"^\d{4}-\d{2}$", value)
+        or re.match(r"^\d{4}-\d{2}-\d{2}", value)
         or re.match(r"^\d{4}M\d{2}$", value)
+        or re.match(r"^\d{4}-M\d{2}$", value)
         or re.match(r"^\d{4}Q[1-4]$", value)
         or re.match(r"^\d{4}$", value)
     )
@@ -96,11 +98,23 @@ def is_time_column(col):
 def parse_period(period):
     value = str(period)
 
+    if isinstance(period, pd.Timestamp):
+        return period.to_period("M").to_timestamp()
+
     if re.match(r"^\d{4}-\d{2}$", value):
         return pd.to_datetime(value + "-01", errors="coerce")
 
+    if re.match(r"^\d{4}-\d{2}-\d{2}", value):
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            return pd.NaT
+        return parsed.to_period("M").to_timestamp()
+
     if re.match(r"^\d{4}M\d{2}$", value):
         return pd.to_datetime(value.replace("M", "-") + "-01", errors="coerce")
+
+    if re.match(r"^\d{4}-M\d{2}$", value):
+        return pd.to_datetime(value.replace("-M", "-") + "-01", errors="coerce")
 
     if re.match(r"^\d{4}Q[1-4]$", value):
         return pd.Period(value, freq="Q").to_timestamp()
@@ -114,6 +128,15 @@ def parse_period(period):
 def melt_eurostat(raw):
     if raw is None or raw.empty:
         return pd.DataFrame()
+
+    if {"TIME_PERIOD", "OBS_VALUE"}.issubset(raw.columns):
+        long = raw.rename(
+            columns={"TIME_PERIOD": "period", "OBS_VALUE": "value"}
+        ).copy()
+        long["date"] = long["period"].apply(parse_period)
+        long["value"] = pd.to_numeric(long["value"], errors="coerce")
+        long = long.dropna(subset=["date", "value"])
+        return long[["date", "value"]]
 
     time_cols = [column for column in raw.columns if is_time_column(column)]
     if not time_cols:
@@ -152,6 +175,7 @@ def get_one_series(country_name, geo, spec):
             "prc_hicp_manr",
             flags=False,
             filter_pars={
+                "freq": "M",
                 "unit": "RCH_A",
                 "coicop": spec["coicop"],
                 "geo": geo,
@@ -263,11 +287,7 @@ def selected_countries_from_request():
     selected = request.args.getlist("countries") or ["Poland"]
     selected = [country for country in selected if country in COUNTRIES]
 
-    one_country = request.args.get("view", "All selected countries")
-    if one_country in COUNTRIES:
-        selected = [one_country]
-
-    return tuple(selected), one_country
+    return tuple(selected)
 
 
 def parse_month(value):
@@ -318,7 +338,7 @@ def filter_to_month_range(raw, start_month, end_month):
     return raw[(raw["month"] >= start_month) & (raw["month"] <= end_month)].copy()
 
 
-def render_options(selected, one_country, start_month, end_month, min_month=None, max_month=None):
+def render_options(selected, start_month, end_month, min_month=None, max_month=None):
     checkbox_html = []
     for country in COUNTRIES:
         checked = " checked" if country in selected else ""
@@ -329,13 +349,6 @@ def render_options(selected, one_country, start_month, end_month, min_month=None
                 {escape(country)}
             </label>
             """
-        )
-
-    view_options = ['<option>All selected countries</option>']
-    for country in COUNTRIES:
-        selected_attr = " selected" if country == one_country else ""
-        view_options.append(
-            f'<option value="{escape(country)}"{selected_attr}>{escape(country)}</option>'
         )
 
     min_attr = f' min="{escape(format_month(min_month))}"' if min_month is not None else ""
@@ -354,7 +367,7 @@ def render_options(selected, one_country, start_month, end_month, min_month=None
     </div>
     """
 
-    return "\n".join(checkbox_html), "\n".join(view_options), range_html
+    return "\n".join(checkbox_html), range_html
 
 
 def dataframe_html(df):
@@ -445,15 +458,14 @@ def pivot_chart_data_html(chart_df):
 
 @app.route("/")
 def index():
-    selected, one_country = selected_countries_from_request()
+    selected = selected_countries_from_request()
     if not selected:
         selected = tuple(COUNTRIES.keys())
 
     should_load = request.args.get("load") == "1"
     default_start_month, default_end_month = default_month_range()
-    checkbox_html, view_options, range_html = render_options(
+    checkbox_html, range_html = render_options(
         selected,
-        one_country,
         default_start_month,
         default_end_month,
     )
@@ -467,7 +479,7 @@ def index():
         metrics_html = ""
         status_html = ""
     else:
-        raw, status_df = load_data(selected, date.today().isoformat())
+        raw, status_df = load_data(selected, datetime.utcnow().strftime("%Y-%m-%d-%H"))
         status_view = status_df.assign(
             min_date=lambda df: pd.to_datetime(
                 df["min_date"], errors="coerce"
@@ -499,9 +511,8 @@ def index():
             metrics_html = ""
         else:
             start_month, end_month, available_min, available_max = requested_month_range(raw)
-            checkbox_html, view_options, range_html = render_options(
+            checkbox_html, range_html = render_options(
                 selected,
-                one_country,
                 start_month,
                 end_month,
                 available_min,
@@ -619,7 +630,7 @@ def index():
                     padding: 0;
                     margin: 0 0 18px;
                 }}
-                legend, label.select-label {{
+                legend {{
                     display: block;
                     font-weight: 700;
                     margin-bottom: 10px;
@@ -804,10 +815,6 @@ def index():
                             <legend>Countries</legend>
                             {checkbox_html}
                         </fieldset>
-                        <label class="select-label" for="view">View</label>
-                        <select id="view" name="view">
-                            {view_options}
-                        </select>
                         {range_html}
                         <input type="hidden" name="load" value="1">
                         <button type="submit" id="load-button">Fetch data and show charts</button>
