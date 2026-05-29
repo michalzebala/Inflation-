@@ -448,6 +448,32 @@ def index():
                     font-weight: 700;
                     cursor: pointer;
                 }}
+                button[aria-busy="true"] {{
+                    opacity: 0.78;
+                    cursor: progress;
+                }}
+                .loader {{
+                    display: none;
+                    align-items: center;
+                    gap: 10px;
+                    margin-top: 14px;
+                    color: var(--muted);
+                    font-size: 14px;
+                }}
+                .loader.is-active {{
+                    display: flex;
+                }}
+                .spinner {{
+                    width: 18px;
+                    height: 18px;
+                    border: 3px solid #c8d3de;
+                    border-top-color: var(--accent);
+                    border-radius: 50%;
+                    animation: spin 0.8s linear infinite;
+                }}
+                @keyframes spin {{
+                    to {{ transform: rotate(360deg); }}
+                }}
                 .metrics {{
                     display: grid;
                     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -502,7 +528,7 @@ def index():
             </header>
             <main>
                 <aside>
-                    <form method="get">
+                    <form method="get" id="data-form">
                         <fieldset>
                             <legend>Kraje</legend>
                             {checkbox_html}
@@ -512,7 +538,11 @@ def index():
                             {view_options}
                         </select>
                         <input type="hidden" name="load" value="1">
-                        <button type="submit">Pobierz dane i pokaż wykresy</button>
+                        <button type="submit" id="load-button">Pobierz dane i pokaż wykresy</button>
+                        <div class="loader" id="loader" role="status" aria-live="polite">
+                            <span class="spinner" aria-hidden="true"></span>
+                            <span>Pobieram dane z Eurostatu...</span>
+                        </div>
                     </form>
                 </aside>
                 <div>
@@ -523,6 +553,17 @@ def index():
                     <div class="table-wrap">{latest_html}</div>
                 </div>
             </main>
+            <script>
+                const form = document.getElementById("data-form");
+                const loader = document.getElementById("loader");
+                const button = document.getElementById("load-button");
+
+                form.addEventListener("submit", () => {{
+                    loader.classList.add("is-active");
+                    button.setAttribute("aria-busy", "true");
+                    button.textContent = "Pobieram...";
+                }});
+            </script>
         </body>
         </html>
         """
