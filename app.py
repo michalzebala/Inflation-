@@ -16,69 +16,69 @@ app = Flask(__name__)
 
 
 COUNTRIES = {
-    "Polska": "PL",
-    "Niemcy": "DE",
+    "Poland": "PL",
+    "Germany": "DE",
     "Austria": "AT",
-    "Grecja": "EL",
+    "Greece": "EL",
     "Estonia": "EE",
-    "Litwa": "LT",
-    "Łotwa": "LV",
+    "Lithuania": "LT",
+    "Latvia": "LV",
 }
 
 FACTORS = {
-    "headline": "Inflacja ogólna",
-    "parts": "Części / materiały",
-    "labor": "Robocizna / usługi naprawcze",
-    "medical": "Zdrowie / koszty leczenia",
-    "fuel_energy": "Paliwo i energia",
+    "headline": "Headline inflation",
+    "parts": "Parts and materials",
+    "labor": "Labor and repair services",
+    "medical": "Health and medical costs",
+    "fuel_energy": "Fuel and energy",
 }
 
 SERIES = [
     {
         "factor": "headline",
-        "factor_label": "Inflacja ogólna",
+        "factor_label": "Headline inflation",
         "indicator": "All-items HICP",
         "coicop": "CP00",
     },
     {
         "factor": "parts",
-        "factor_label": "Części / materiały",
+        "factor_label": "Parts and materials",
         "indicator": "Spare parts and accessories for vehicles",
         "coicop": "CP0721",
     },
     {
         "factor": "labor",
-        "factor_label": "Robocizna / usługi naprawcze",
+        "factor_label": "Labor and repair services",
         "indicator": "Maintenance and repair of vehicles",
         "coicop": "CP0723",
     },
     {
         "factor": "medical",
-        "factor_label": "Zdrowie / koszty leczenia",
+        "factor_label": "Health and medical costs",
         "indicator": "Health",
         "coicop": "CP06",
     },
     {
         "factor": "fuel_energy",
-        "factor_label": "Paliwo i energia",
+        "factor_label": "Fuel and energy",
         "indicator": "Fuels and lubricants for personal transport",
         "coicop": "CP0722",
     },
     {
         "factor": "fuel_energy",
-        "factor_label": "Paliwo i energia",
+        "factor_label": "Fuel and energy",
         "indicator": "Electricity, gas and other fuels",
         "coicop": "CP045",
     },
     {
         "factor": "fuel_energy",
-        "factor_label": "Paliwo i energia",
+        "factor_label": "Fuel and energy",
         "indicator": "Energy aggregate",
         "coicop": "NRG",
     },
 ]
 
-START_DATE = pd.Timestamp.today().normalize() - pd.DateOffset(years=5)
+START_DATE = pd.Timestamp.today().normalize() - pd.DateOffset(years=10)
 
 
 def is_time_column(col):
@@ -175,7 +175,7 @@ def get_one_series(country_name, geo, spec):
         return long, build_status(
             country_name,
             spec,
-            "ok" if len(long) > 0 else "no data in last 5 years",
+            "ok" if len(long) > 0 else "no data in last 10 years",
             len(long),
             long["date"].min() if len(long) > 0 else None,
             long["date"].max() if len(long) > 0 else None,
@@ -229,7 +229,7 @@ def aggregate_for_charts(raw):
 def make_plot(chart_df, factor):
     sub = chart_df[chart_df["factor"] == factor].copy()
     if sub.empty:
-        return f'<p class="notice">{escape(FACTORS[factor])}: brak danych.</p>'
+        return f'<p class="notice">{escape(FACTORS[factor])}: no data available.</p>'
 
     fig = px.line(
         sub,
@@ -238,11 +238,11 @@ def make_plot(chart_df, factor):
         color="country",
         title=FACTORS[factor],
         labels={
-            "date": "Data",
-            "value": "Inflacja r/r, %",
-            "country": "Kraj",
-            "n_indicators": "Liczba wskaźników",
-            "indicators": "Wskaźniki",
+            "date": "Date",
+            "value": "Year-over-year inflation, %",
+            "country": "Country",
+            "n_indicators": "Number of indicators",
+            "indicators": "Indicators",
             "coicops": "COICOP",
         },
         hover_data={
@@ -253,7 +253,7 @@ def make_plot(chart_df, factor):
             "factor_label": False,
         },
     )
-    fig.update_layout(height=520, hovermode="x unified", legend_title_text="Kraj")
+    fig.update_layout(height=520, hovermode="x unified", legend_title_text="Country")
     return fig.to_html(full_html=False, include_plotlyjs="cdn")
 
 
@@ -261,7 +261,7 @@ def selected_countries_from_request():
     selected = request.args.getlist("countries") or list(COUNTRIES.keys())
     selected = [country for country in selected if country in COUNTRIES]
 
-    one_country = request.args.get("view", "Wszystkie wybrane kraje")
+    one_country = request.args.get("view", "All selected countries")
     if one_country in COUNTRIES:
         selected = [one_country]
 
@@ -281,7 +281,7 @@ def render_options(selected, one_country):
             """
         )
 
-    view_options = ['<option>Wszystkie wybrane kraje</option>']
+    view_options = ['<option>All selected countries</option>']
     for country in COUNTRIES:
         selected_attr = " selected" if country == one_country else ""
         view_options.append(
@@ -293,7 +293,7 @@ def render_options(selected, one_country):
 
 def dataframe_html(df):
     if df.empty:
-        return '<p class="notice">Brak danych.</p>'
+        return '<p class="notice">No data available.</p>'
     return df.to_html(index=False, classes="dataframe", border=0, escape=True)
 
 
@@ -308,8 +308,9 @@ def index():
 
     if not should_load:
         charts_html = (
-            '<p class="notice">Wybierz kraje i kliknij przycisk, aby pobrać dane z Eurostatu.</p>'
+            '<p class="notice">Select countries and click the button to fetch Eurostat data.</p>'
         )
+        data_table_html = ""
         latest_html = ""
         metrics_html = ""
         status_html = ""
@@ -322,14 +323,26 @@ def index():
             max_date=lambda df: pd.to_datetime(
                 df["max_date"], errors="coerce"
             ).dt.strftime("%Y-%m-%d"),
+        ).rename(
+            columns={
+                "country": "Country",
+                "factor": "Factor",
+                "indicator": "Indicator",
+                "coicop": "COICOP",
+                "status": "Status",
+                "n_rows": "Rows",
+                "min_date": "First date",
+                "max_date": "Latest date",
+            }
         )
         status_html = f"""
-        <h2>Diagnostyka pobierania danych</h2>
+        <h2>Data Fetch Diagnostics</h2>
         <div class="table-wrap">{dataframe_html(status_view)}</div>
         """
 
         if raw.empty:
-            charts_html = '<p class="notice error">Nie pobrano żadnych danych.</p>'
+            charts_html = '<p class="notice error">No data was fetched.</p>'
+            data_table_html = ""
             latest_html = ""
             metrics_html = ""
         else:
@@ -337,6 +350,34 @@ def index():
             charts_html = "\n".join(
                 f"<section>{make_plot(chart_df, factor)}</section>" for factor in FACTORS
             )
+            data_table = chart_df[
+                [
+                    "date",
+                    "country",
+                    "factor_label",
+                    "value",
+                    "n_indicators",
+                    "indicators",
+                    "coicops",
+                ]
+            ].assign(
+                date=lambda df: df["date"].dt.strftime("%Y-%m-%d"),
+                value=lambda df: df["value"].map(lambda value: f"{value:.2f}"),
+            ).rename(
+                columns={
+                    "date": "Date",
+                    "country": "Country",
+                    "factor_label": "Factor",
+                    "value": "Value",
+                    "n_indicators": "Indicators",
+                    "indicators": "Indicator names",
+                    "coicops": "COICOP",
+                }
+            )
+            data_table_html = f"""
+            <h2>Chart Data</h2>
+            <div class="table-wrap data-table">{dataframe_html(data_table)}</div>
+            """
             latest = (
                 chart_df.sort_values("date")
                 .groupby(["country", "factor_label"], as_index=False)
@@ -356,24 +397,34 @@ def index():
             ].assign(
                 date=lambda df: df["date"].dt.strftime("%Y-%m-%d"),
                 value=lambda df: df["value"].map(lambda value: f"{value:.2f}"),
+            ).rename(
+                columns={
+                    "country": "Country",
+                    "factor_label": "Factor",
+                    "date": "Date",
+                    "value": "Value",
+                    "n_indicators": "Indicators",
+                    "indicators": "Indicator names",
+                    "coicops": "COICOP",
+                }
             )
             latest_html = dataframe_html(latest)
             metrics_html = f"""
             <div class="metrics">
-                <div><strong>{len(raw):,}</strong><span>Rekordy źródłowe</span></div>
-                <div><strong>{len(chart_df):,}</strong><span>Rekordy po agregacji</span></div>
-                <div><strong>{START_DATE.date()}</strong><span>Początek zakresu</span></div>
+                <div><strong>{len(raw):,}</strong><span>Source records</span></div>
+                <div><strong>{len(chart_df):,}</strong><span>Aggregated records</span></div>
+                <div><strong>{START_DATE.date()}</strong><span>Start of range</span></div>
             </div>
             """.replace(",", " ")
 
     return Markup(
         f"""
         <!doctype html>
-        <html lang="pl">
+        <html lang="en">
         <head>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>Dashboard inflacji Motor</title>
+            <title>Motor Inflation Dashboard</title>
             <style>
                 :root {{
                     color-scheme: light;
@@ -502,6 +553,12 @@ def index():
                 }}
                 .error {{ color: #9d1c1c; }}
                 .table-wrap {{ overflow-x: auto; margin: 12px 0 30px; }}
+                .data-table {{
+                    max-height: 520px;
+                    overflow: auto;
+                    border: 1px solid var(--line);
+                    border-radius: 8px;
+                }}
                 table.dataframe {{
                     width: 100%;
                     border-collapse: collapse;
@@ -514,6 +571,11 @@ def index():
                     vertical-align: top;
                 }}
                 table.dataframe th {{ background: var(--panel); }}
+                .data-table table.dataframe th {{
+                    position: sticky;
+                    top: 0;
+                    z-index: 1;
+                }}
                 @media (max-width: 860px) {{
                     main {{ grid-template-columns: 1fr; }}
                     aside {{ position: static; }}
@@ -523,25 +585,25 @@ def index():
         </head>
         <body>
             <header>
-                <h1>Dashboard inflacji dla czynników Motor</h1>
-                <p class="subtitle">Dane Eurostat HICP, zakres ostatnich 5 lat.</p>
+                <h1>Motor Cost Inflation Dashboard</h1>
+                <p class="subtitle">Eurostat HICP data for the last 10 years.</p>
             </header>
             <main>
                 <aside>
                     <form method="get" id="data-form">
                         <fieldset>
-                            <legend>Kraje</legend>
+                            <legend>Countries</legend>
                             {checkbox_html}
                         </fieldset>
-                        <label class="select-label" for="view">Widok</label>
+                        <label class="select-label" for="view">View</label>
                         <select id="view" name="view">
                             {view_options}
                         </select>
                         <input type="hidden" name="load" value="1">
-                        <button type="submit" id="load-button">Pobierz dane i pokaż wykresy</button>
+                        <button type="submit" id="load-button">Fetch data and show charts</button>
                         <div class="loader" id="loader" role="status" aria-live="polite">
                             <span class="spinner" aria-hidden="true"></span>
-                            <span>Pobieram dane z Eurostatu...</span>
+                            <span>Fetching Eurostat data...</span>
                         </div>
                     </form>
                 </aside>
@@ -549,7 +611,8 @@ def index():
                     {metrics_html}
                     {status_html}
                     {charts_html}
-                    <h2>Najnowsze dostępne odczyty</h2>
+                    {data_table_html}
+                    <h2>Latest Available Readings</h2>
                     <div class="table-wrap">{latest_html}</div>
                 </div>
             </main>
@@ -561,7 +624,7 @@ def index():
                 form.addEventListener("submit", () => {{
                     loader.classList.add("is-active");
                     button.setAttribute("aria-busy", "true");
-                    button.textContent = "Pobieram...";
+                    button.textContent = "Fetching...";
                 }});
             </script>
         </body>
