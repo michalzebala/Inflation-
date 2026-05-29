@@ -1,6 +1,7 @@
 import functools
 import re
 import warnings
+from datetime import date
 from html import escape
 
 import eurostat
@@ -78,7 +79,8 @@ SERIES = [
     },
 ]
 
-START_DATE = pd.Timestamp.today().normalize() - pd.DateOffset(years=10)
+DEFAULT_YEARS = 10
+START_DATE = pd.Timestamp.today().normalize() - pd.DateOffset(years=DEFAULT_YEARS)
 
 
 def is_time_column(col):
@@ -186,7 +188,7 @@ def get_one_series(country_name, geo, spec):
 
 
 @functools.lru_cache(maxsize=32)
-def load_data(selected_countries):
+def load_data(selected_countries, cache_day):
     frames = []
     statuses = []
 
@@ -268,7 +270,55 @@ def selected_countries_from_request():
     return tuple(selected), one_country
 
 
-def render_options(selected, one_country):
+def parse_month(value):
+    if not value:
+        return None
+
+    parsed = pd.to_datetime(f"{value}-01", errors="coerce")
+    if pd.isna(parsed):
+        return None
+
+    return parsed.to_period("M").to_timestamp()
+
+
+def format_month(value):
+    if value is None or pd.isna(value):
+        return ""
+    return pd.Timestamp(value).strftime("%Y-%m")
+
+
+def requested_month_range(raw):
+    available_min = raw["month"].min()
+    available_max = raw["month"].max()
+
+    default_end = available_max
+    default_start = max(available_min, default_end - pd.DateOffset(years=DEFAULT_YEARS))
+
+    requested_start = parse_month(request.args.get("start_month"))
+    requested_end = parse_month(request.args.get("end_month"))
+    start_month = requested_start if requested_start is not None else default_start
+    end_month = requested_end if requested_end is not None else default_end
+
+    start_month = max(start_month, available_min)
+    end_month = min(end_month, available_max)
+
+    if start_month > end_month:
+        start_month, end_month = default_start, default_end
+
+    return start_month, end_month, available_min, available_max
+
+
+def default_month_range():
+    end_month = pd.Timestamp.today().normalize().to_period("M").to_timestamp()
+    start_month = end_month - pd.DateOffset(years=DEFAULT_YEARS)
+    return start_month, end_month
+
+
+def filter_to_month_range(raw, start_month, end_month):
+    return raw[(raw["month"] >= start_month) & (raw["month"] <= end_month)].copy()
+
+
+def render_options(selected, one_country, start_month, end_month, min_month=None, max_month=None):
     checkbox_html = []
     for country in COUNTRIES:
         checked = " checked" if country in selected else ""
@@ -288,7 +338,23 @@ def render_options(selected, one_country):
             f'<option value="{escape(country)}"{selected_attr}>{escape(country)}</option>'
         )
 
-    return "\n".join(checkbox_html), "\n".join(view_options)
+    min_attr = f' min="{escape(format_month(min_month))}"' if min_month is not None else ""
+    max_attr = f' max="{escape(format_month(max_month))}"' if max_month is not None else ""
+
+    range_html = f"""
+    <div class="date-range">
+        <label>
+            <span>Start month</span>
+            <input type="month" name="start_month" value="{escape(format_month(start_month))}"{min_attr}{max_attr}>
+        </label>
+        <label>
+            <span>End month</span>
+            <input type="month" name="end_month" value="{escape(format_month(end_month))}"{min_attr}{max_attr}>
+        </label>
+    </div>
+    """
+
+    return "\n".join(checkbox_html), "\n".join(view_options), range_html
 
 
 def dataframe_html(df):
@@ -383,8 +449,14 @@ def index():
     if not selected:
         selected = tuple(COUNTRIES.keys())
 
-    checkbox_html, view_options = render_options(selected, one_country)
     should_load = request.args.get("load") == "1"
+    default_start_month, default_end_month = default_month_range()
+    checkbox_html, view_options, range_html = render_options(
+        selected,
+        one_country,
+        default_start_month,
+        default_end_month,
+    )
 
     if not should_load:
         charts_html = (
@@ -395,7 +467,7 @@ def index():
         metrics_html = ""
         status_html = ""
     else:
-        raw, status_df = load_data(selected)
+        raw, status_df = load_data(selected, date.today().isoformat())
         status_view = status_df.assign(
             min_date=lambda df: pd.to_datetime(
                 df["min_date"], errors="coerce"
@@ -426,50 +498,71 @@ def index():
             latest_html = ""
             metrics_html = ""
         else:
-            chart_df = aggregate_for_charts(raw)
-            charts_html = "\n".join(
-                f"<section>{make_plot(chart_df, factor)}</section>" for factor in FACTORS
+            start_month, end_month, available_min, available_max = requested_month_range(raw)
+            checkbox_html, view_options, range_html = render_options(
+                selected,
+                one_country,
+                start_month,
+                end_month,
+                available_min,
+                available_max,
             )
-            data_table_html = f"""
-            <h2>Chart Data</h2>
-            <div class="table-wrap data-table">{pivot_chart_data_html(chart_df)}</div>
-            """
-            latest = (
-                chart_df.sort_values("date")
-                .groupby(["country", "factor_label"], as_index=False)
-                .tail(1)
-                .sort_values(["factor_label", "country"])
-            )
-            latest = latest[
-                [
-                    "country",
-                    "factor_label",
-                    "date",
-                    "value",
-                    "n_indicators",
-                    "indicators",
-                    "coicops",
-                ]
-            ].assign(
-                date=lambda df: df["date"].dt.strftime("%Y-%m-%d"),
-                value=lambda df: df["value"].map(lambda value: f"{value:.2f}"),
-            ).rename(
-                columns={
-                    "country": "Country",
-                    "factor_label": "Factor",
-                    "date": "Date",
-                    "value": "Value",
-                    "n_indicators": "Indicators",
-                    "indicators": "Indicator names",
-                    "coicops": "COICOP",
-                }
-            )
-            latest_html = dataframe_html(latest)
+
+            visible_raw = filter_to_month_range(raw, start_month, end_month)
+            chart_df = aggregate_for_charts(visible_raw)
+
+            if chart_df.empty:
+                charts_html = '<p class="notice">No data is available for the selected range.</p>'
+                data_table_html = """
+                <h2>Chart Data</h2>
+                <p class="notice">No data is available for the selected range.</p>
+                """
+                latest_html = ""
+            else:
+                charts_html = "\n".join(
+                    f"<section>{make_plot(chart_df, factor)}</section>" for factor in FACTORS
+                )
+                data_table_html = f"""
+                <h2>Chart Data</h2>
+                <div class="table-wrap data-table">{pivot_chart_data_html(chart_df)}</div>
+                """
+                latest = (
+                    chart_df.sort_values("date")
+                    .groupby(["country", "factor_label"], as_index=False)
+                    .tail(1)
+                    .sort_values(["factor_label", "country"])
+                )
+                latest = latest[
+                    [
+                        "country",
+                        "factor_label",
+                        "date",
+                        "value",
+                        "n_indicators",
+                        "indicators",
+                        "coicops",
+                    ]
+                ].assign(
+                    date=lambda df: df["date"].dt.strftime("%Y-%m-%d"),
+                    value=lambda df: df["value"].map(lambda value: f"{value:.2f}"),
+                ).rename(
+                    columns={
+                        "country": "Country",
+                        "factor_label": "Factor",
+                        "date": "Date",
+                        "value": "Value",
+                        "n_indicators": "Indicators",
+                        "indicators": "Indicator names",
+                        "coicops": "COICOP",
+                    }
+                )
+                latest_html = dataframe_html(latest)
+
             metrics_html = f"""
             <div class="metrics">
-                <div><strong>{len(raw):,}</strong><span>Source records</span></div>
+                <div><strong>{len(visible_raw):,}</strong><span>Visible source records</span></div>
                 <div><strong>{len(chart_df):,}</strong><span>Aggregated records</span></div>
-                <div><strong>{START_DATE.date()}</strong><span>Start of range</span></div>
+                <div><strong>{format_month(start_month)} – {format_month(end_month)}</strong><span>Visible range</span></div>
             </div>
             """.replace(",", " ")
 
@@ -547,6 +640,27 @@ def index():
                     border: 1px solid var(--line);
                     background: white;
                 }}
+                input[type="month"] {{
+                    width: 100%;
+                    min-height: 40px;
+                    padding: 0 10px;
+                    font: inherit;
+                    border-radius: 6px;
+                    border: 1px solid var(--line);
+                    background: white;
+                }}
+                .date-range {{
+                    display: grid;
+                    gap: 10px;
+                    margin-top: 18px;
+                }}
+                .date-range label span {{
+                    display: block;
+                    margin-bottom: 6px;
+                    font-size: 13px;
+                    font-weight: 700;
+                    color: var(--muted);
+                }}
                 button {{
                     margin-top: 18px;
                     border-color: var(--accent);
@@ -616,7 +730,11 @@ def index():
                     border-radius: 8px;
                 }}
                 .excel-table {{
+                    width: max-content;
                     min-width: max-content;
+                    table-layout: fixed;
+                    border-collapse: separate !important;
+                    border-spacing: 0;
                 }}
                 table.dataframe {{
                     width: 100%;
@@ -650,20 +768,24 @@ def index():
                 }}
                 .excel-table tbody .sticky-col {{
                     top: auto;
+                    z-index: 2;
                 }}
                 .excel-table thead .sticky-col {{
-                    z-index: 3;
+                    top: 0;
+                    z-index: 4;
                     background: var(--panel);
                 }}
                 .excel-table .country-col {{
                     left: 0;
                     min-width: 118px;
                     width: 118px;
+                    max-width: 118px;
                 }}
                 .excel-table .factor-col {{
                     left: 118px;
                     min-width: 190px;
                     width: 190px;
+                    max-width: 190px;
                 }}
                 @media (max-width: 860px) {{
                     main {{ grid-template-columns: 1fr; }}
@@ -688,6 +810,7 @@ def index():
                         <select id="view" name="view">
                             {view_options}
                         </select>
+                        {range_html}
                         <input type="hidden" name="load" value="1">
                         <button type="submit" id="load-button">Fetch data and show charts</button>
                         <div class="loader" id="loader" role="status" aria-live="polite">
