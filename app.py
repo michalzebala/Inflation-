@@ -1,8 +1,11 @@
 import functools
+import json
 import re
 import warnings
 from datetime import datetime
 from html import escape
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 import eurostat
 import pandas as pd
@@ -81,6 +84,9 @@ SERIES = [
 
 DEFAULT_YEARS = 10
 START_DATE = pd.Timestamp.today().normalize() - pd.DateOffset(years=DEFAULT_YEARS)
+EUROSTAT_API_BASE = (
+    "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/"
+)
 
 
 def is_time_column(col):
@@ -169,25 +175,91 @@ def build_status(country_name, spec, status, n_rows=0, min_date=None, max_date=N
     }
 
 
+def jsonstat_time_series(payload):
+    dimensions = payload.get("dimension", {})
+    dimension_ids = payload.get("id", [])
+    sizes = payload.get("size", [])
+
+    if "time" not in dimensions or "value" not in payload:
+        return pd.DataFrame()
+
+    time_index = dimension_ids.index("time")
+    time_category = dimensions["time"].get("category", {})
+    time_positions = time_category.get("index", {})
+
+    if isinstance(time_positions, list):
+        time_positions = {label: position for position, label in enumerate(time_positions)}
+
+    value_data = payload["value"]
+    stride = 1
+    for size in sizes[time_index + 1 :]:
+        stride *= size
+
+    records = []
+    for period, position in sorted(time_positions.items(), key=lambda item: item[1]):
+        flat_index = position * stride
+        if isinstance(value_data, list):
+            value = value_data[flat_index] if flat_index < len(value_data) else None
+        else:
+            value = value_data.get(str(flat_index))
+
+        if value is None:
+            continue
+
+        records.append({"date": parse_period(period), "value": value})
+
+    if not records:
+        return pd.DataFrame()
+
+    long = pd.DataFrame(records)
+    long["value"] = pd.to_numeric(long["value"], errors="coerce")
+    long = long.dropna(subset=["date", "value"])
+    return long[["date", "value"]]
+
+
+def fetch_eurostat_api_series(geo, spec):
+    params = {
+        "format": "JSON",
+        "lang": "en",
+        "freq": "M",
+        "unit": "RCH_A",
+        "coicop": spec["coicop"],
+        "geo": geo,
+        "sinceTimePeriod": START_DATE.strftime("%Y-%m"),
+    }
+    url = f"{EUROSTAT_API_BASE}prc_hicp_manr?{urlencode(params)}"
+
+    with urlopen(url, timeout=30) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+
+    return jsonstat_time_series(payload)
+
+
+def fetch_eurostat_package_series(geo, spec):
+    raw = eurostat.get_data_df(
+        "prc_hicp_manr",
+        flags=False,
+        filter_pars={
+            "freq": "M",
+            "unit": "RCH_A",
+            "coicop": spec["coicop"],
+            "geo": geo,
+        },
+    )
+    return melt_eurostat(raw)
+
+
 def get_one_series(country_name, geo, spec):
     try:
-        raw = eurostat.get_data_df(
-            "prc_hicp_manr",
-            flags=False,
-            filter_pars={
-                "freq": "M",
-                "unit": "RCH_A",
-                "coicop": spec["coicop"],
-                "geo": geo,
-            },
-        )
+        source = "Eurostat API"
+        try:
+            long = fetch_eurostat_api_series(geo, spec)
+        except Exception:
+            source = "eurostat package fallback"
+            long = fetch_eurostat_package_series(geo, spec)
 
-        if raw is None or raw.empty:
-            return pd.DataFrame(), build_status(country_name, spec, "empty response")
-
-        long = melt_eurostat(raw)
         if long.empty:
-            return pd.DataFrame(), build_status(country_name, spec, "empty after melt")
+            return pd.DataFrame(), build_status(country_name, spec, "empty response")
 
         long = long[long["date"] >= START_DATE].copy()
         long["country"] = country_name
@@ -196,7 +268,7 @@ def get_one_series(country_name, geo, spec):
         long["factor_label"] = spec["factor_label"]
         long["indicator"] = spec["indicator"]
         long["coicop"] = spec["coicop"]
-        long["source"] = "Eurostat prc_hicp_manr"
+        long["source"] = f"{source} prc_hicp_manr"
 
         return long, build_status(
             country_name,
@@ -571,11 +643,9 @@ def index():
 
             metrics_html = f"""
             <div class="metrics">
-                <div><strong>{len(visible_raw):,}</strong><span>Visible source records</span></div>
-                <div><strong>{len(chart_df):,}</strong><span>Aggregated records</span></div>
-                <div><strong>{format_month(start_month)} – {format_month(end_month)}</strong><span>Visible range</span></div>
+                <div><span>Visible range</span><strong>{format_month(start_month)} – {format_month(end_month)}</strong></div>
             </div>
-            """.replace(",", " ")
+            """
 
     return Markup(
         f"""
@@ -706,22 +776,28 @@ def index():
                     to {{ transform: rotate(360deg); }}
                 }}
                 .metrics {{
-                    display: grid;
-                    grid-template-columns: repeat(3, minmax(0, 1fr));
-                    gap: 12px;
-                    margin-bottom: 24px;
+                    display: flex;
+                    margin-bottom: 16px;
                 }}
                 .metrics div {{
-                    padding: 16px;
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 8px;
+                    padding: 8px 10px;
                     border: 1px solid var(--line);
-                    border-radius: 8px;
+                    border-radius: 6px;
+                    background: var(--panel);
                 }}
                 .metrics strong {{
-                    display: block;
-                    font-size: 24px;
-                    margin-bottom: 4px;
+                    display: inline;
+                    font-size: 14px;
+                    font-weight: 700;
+                    margin-bottom: 0;
                 }}
-                .metrics span {{ color: var(--muted); }}
+                .metrics span {{
+                    color: var(--muted);
+                    font-size: 13px;
+                }}
                 section {{
                     padding: 8px 0 22px;
                     border-bottom: 1px solid var(--line);
