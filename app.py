@@ -43,42 +43,49 @@ SERIES = [
         "factor_label": "Headline inflation",
         "indicator": "All-items HICP",
         "coicop": "CP00",
+        "coicop18": "TOTAL",
     },
     {
         "factor": "parts",
         "factor_label": "Parts and materials",
         "indicator": "Spare parts and accessories for vehicles",
         "coicop": "CP0721",
+        "coicop18": "CP0721",
     },
     {
         "factor": "labor",
         "factor_label": "Labor and repair services",
         "indicator": "Maintenance and repair of vehicles",
         "coicop": "CP0723",
+        "coicop18": "CP0723",
     },
     {
         "factor": "medical",
         "factor_label": "Health and medical costs",
         "indicator": "Health",
         "coicop": "CP06",
+        "coicop18": "CP06",
     },
     {
         "factor": "fuel_energy",
         "factor_label": "Fuel and energy",
         "indicator": "Fuels and lubricants for personal transport",
         "coicop": "CP0722",
+        "coicop18": "CP0722",
     },
     {
         "factor": "fuel_energy",
         "factor_label": "Fuel and energy",
         "indicator": "Electricity, gas and other fuels",
         "coicop": "CP045",
+        "coicop18": "CP045",
     },
     {
         "factor": "fuel_energy",
         "factor_label": "Fuel and energy",
         "indicator": "Energy aggregate",
         "coicop": "NRG",
+        "coicop18": "NRG",
     },
 ]
 
@@ -87,6 +94,8 @@ START_DATE = pd.Timestamp.today().normalize() - pd.DateOffset(years=DEFAULT_YEAR
 EUROSTAT_API_BASE = (
     "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/"
 )
+PRIMARY_EUROSTAT_DATASET = "prc_hicp_minr"
+FALLBACK_EUROSTAT_DATASET = "prc_hicp_manr"
 
 
 def is_time_column(col):
@@ -223,11 +232,11 @@ def fetch_eurostat_api_series(geo, spec):
         "lang": "en",
         "freq": "M",
         "unit": "RCH_A",
-        "coicop": spec["coicop"],
+        "coicop18": spec["coicop18"],
         "geo": geo,
         "sinceTimePeriod": START_DATE.strftime("%Y-%m"),
     }
-    url = f"{EUROSTAT_API_BASE}prc_hicp_manr?{urlencode(params)}"
+    url = f"{EUROSTAT_API_BASE}{PRIMARY_EUROSTAT_DATASET}?{urlencode(params)}"
 
     with urlopen(url, timeout=30) as response:
         payload = json.loads(response.read().decode("utf-8"))
@@ -237,7 +246,7 @@ def fetch_eurostat_api_series(geo, spec):
 
 def fetch_eurostat_package_series(geo, spec):
     raw = eurostat.get_data_df(
-        "prc_hicp_manr",
+        FALLBACK_EUROSTAT_DATASET,
         flags=False,
         filter_pars={
             "freq": "M",
@@ -268,7 +277,13 @@ def get_one_series(country_name, geo, spec):
         long["factor_label"] = spec["factor_label"]
         long["indicator"] = spec["indicator"]
         long["coicop"] = spec["coicop"]
-        long["source"] = f"{source} prc_hicp_manr"
+        long["coicop18"] = spec["coicop18"]
+        source_dataset = (
+            PRIMARY_EUROSTAT_DATASET
+            if source == "Eurostat API"
+            else FALLBACK_EUROSTAT_DATASET
+        )
+        long["source"] = f"{source} {source_dataset}"
 
         return long, build_status(
             country_name,
