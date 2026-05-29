@@ -386,8 +386,9 @@ def requested_month_range(raw):
     default_end = available_max
     default_start = max(available_min, default_end - pd.DateOffset(years=DEFAULT_YEARS))
 
-    requested_start = parse_month(request.args.get("start_month"))
-    requested_end = parse_month(request.args.get("end_month"))
+    use_custom_range = request.args.get("range_changed") == "1"
+    requested_start = parse_month(request.args.get("start_month")) if use_custom_range else None
+    requested_end = parse_month(request.args.get("end_month")) if use_custom_range else None
     start_month = requested_start if requested_start is not None else default_start
     end_month = requested_end if requested_end is not None else default_end
 
@@ -397,7 +398,7 @@ def requested_month_range(raw):
     if start_month > end_month:
         start_month, end_month = default_start, default_end
 
-    return start_month, end_month, available_min, available_max
+    return start_month, end_month, available_min, available_max, use_custom_range
 
 
 def default_month_range():
@@ -410,7 +411,14 @@ def filter_to_month_range(raw, start_month, end_month):
     return raw[(raw["month"] >= start_month) & (raw["month"] <= end_month)].copy()
 
 
-def render_options(selected, start_month, end_month, min_month=None, max_month=None):
+def render_options(
+    selected,
+    start_month,
+    end_month,
+    min_month=None,
+    max_month=None,
+    use_custom_range=False,
+):
     checkbox_html = []
     for country in COUNTRIES:
         checked = " checked" if country in selected else ""
@@ -436,6 +444,7 @@ def render_options(selected, start_month, end_month, min_month=None, max_month=N
             <span>End month</span>
             <input type="month" name="end_month" value="{escape(format_month(end_month))}"{min_attr}{max_attr}>
         </label>
+        <input type="hidden" id="range-changed" name="range_changed" value="{"1" if use_custom_range else "0"}">
     </div>
     """
 
@@ -582,13 +591,20 @@ def index():
             latest_html = ""
             metrics_html = ""
         else:
-            start_month, end_month, available_min, available_max = requested_month_range(raw)
+            (
+                start_month,
+                end_month,
+                available_min,
+                available_max,
+                use_custom_range,
+            ) = requested_month_range(raw)
             checkbox_html, range_html = render_options(
                 selected,
                 start_month,
                 end_month,
                 available_min,
                 available_max,
+                use_custom_range,
             )
 
             visible_raw = filter_to_month_range(raw, start_month, end_month)
@@ -913,11 +929,18 @@ def index():
                 const form = document.getElementById("data-form");
                 const loader = document.getElementById("loader");
                 const button = document.getElementById("load-button");
+                const rangeChanged = document.getElementById("range-changed");
 
                 form.addEventListener("submit", () => {{
                     loader.classList.add("is-active");
                     button.setAttribute("aria-busy", "true");
                     button.textContent = "Fetching...";
+                }});
+
+                document.querySelectorAll('input[type="month"]').forEach((input) => {{
+                    input.addEventListener("change", () => {{
+                        rangeChanged.value = "1";
+                    }});
                 }});
 
                 window.addEventListener("load", () => {{
