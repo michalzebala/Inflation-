@@ -3,6 +3,7 @@ import json
 import re
 import warnings
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from html import escape
 from urllib.parse import urlencode
 from urllib.request import urlopen
@@ -35,6 +36,22 @@ FACTORS = {
     "labor": "Labor and repair services",
     "medical": "Health and medical costs",
     "fuel_energy": "Fuel and energy",
+    "property_repair": "Property repair and maintenance",
+    "property_materials": "Property repair materials",
+    "property_services": "Property repair services",
+    "household_equipment": "Household equipment and maintenance",
+}
+
+FACTOR_ICONS = {
+    "headline": "chart",
+    "parts": "parts",
+    "labor": "tools",
+    "medical": "medical",
+    "fuel_energy": "energy",
+    "property_repair": "home",
+    "property_materials": "materials",
+    "property_services": "worker",
+    "household_equipment": "equipment",
 }
 
 SERIES = [
@@ -86,6 +103,48 @@ SERIES = [
         "indicator": "Energy aggregate",
         "coicop": "NRG",
         "coicop18": "NRG",
+    },
+    {
+        "factor": "property_repair",
+        "factor_label": "Property repair and maintenance",
+        "indicator": "Maintenance, repair and security of the dwelling",
+        "coicop": "CP043",
+        "coicop18": "CP043",
+    },
+    {
+        "factor": "property_materials",
+        "factor_label": "Property repair materials",
+        "indicator": "Security equipment and materials for dwelling maintenance and repair",
+        "coicop": "CP0431",
+        "coicop18": "CP0431",
+    },
+    {
+        "factor": "property_materials",
+        "factor_label": "Property repair materials",
+        "indicator": "Materials for the maintenance and repair of the dwelling",
+        "coicop": "CP04311",
+        "coicop18": "CP04311",
+    },
+    {
+        "factor": "property_services",
+        "factor_label": "Property repair services",
+        "indicator": "Services for the maintenance, repair and security of the dwelling",
+        "coicop": "CP0432",
+        "coicop18": "CP0432",
+    },
+    {
+        "factor": "property_services",
+        "factor_label": "Property repair services",
+        "indicator": "Services for the maintenance, repair and security of the dwelling",
+        "coicop": "CP04320",
+        "coicop18": "CP04320",
+    },
+    {
+        "factor": "household_equipment",
+        "factor_label": "Household equipment and maintenance",
+        "indicator": "Furnishings, household equipment and routine household maintenance",
+        "coicop": "CP05",
+        "coicop18": "CP05",
     },
 ]
 
@@ -171,17 +230,42 @@ def melt_eurostat(raw):
     return long[["date", "value"]]
 
 
-def build_status(country_name, spec, status, n_rows=0, min_date=None, max_date=None):
+def build_status(
+    country_name,
+    spec,
+    status,
+    n_rows=0,
+    min_date=None,
+    max_date=None,
+    latest_data_upload=None,
+):
     return {
         "country": country_name,
         "factor": spec["factor_label"],
         "indicator": spec["indicator"],
         "coicop": spec["coicop"],
+        "coicop18": spec["coicop18"],
         "status": status,
         "n_rows": n_rows,
         "min_date": min_date,
         "max_date": max_date,
+        "latest_data_upload": latest_data_upload,
     }
+
+
+def parse_upload_date(value):
+    if not value:
+        return pd.NaT
+
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return pd.NaT
+
+    timestamp = pd.Timestamp(parsed)
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.tz_convert(None)
+    return timestamp.normalize()
 
 
 def jsonstat_time_series(payload):
@@ -239,9 +323,10 @@ def fetch_eurostat_api_series(geo, spec):
     url = f"{EUROSTAT_API_BASE}{PRIMARY_EUROSTAT_DATASET}?{urlencode(params)}"
 
     with urlopen(url, timeout=30) as response:
+        latest_data_upload = parse_upload_date(response.headers.get("Last-Modified"))
         payload = json.loads(response.read().decode("utf-8"))
 
-    return jsonstat_time_series(payload)
+    return jsonstat_time_series(payload), latest_data_upload
 
 
 def fetch_eurostat_package_series(geo, spec):
@@ -255,17 +340,17 @@ def fetch_eurostat_package_series(geo, spec):
             "geo": geo,
         },
     )
-    return melt_eurostat(raw)
+    return melt_eurostat(raw), pd.NaT
 
 
 def get_one_series(country_name, geo, spec):
     try:
         source = "Eurostat API"
         try:
-            long = fetch_eurostat_api_series(geo, spec)
+            long, latest_data_upload = fetch_eurostat_api_series(geo, spec)
         except Exception:
             source = "eurostat package fallback"
-            long = fetch_eurostat_package_series(geo, spec)
+            long, latest_data_upload = fetch_eurostat_package_series(geo, spec)
 
         if long.empty:
             return pd.DataFrame(), build_status(country_name, spec, "empty response")
@@ -278,6 +363,7 @@ def get_one_series(country_name, geo, spec):
         long["indicator"] = spec["indicator"]
         long["coicop"] = spec["coicop"]
         long["coicop18"] = spec["coicop18"]
+        long["latest_data_upload"] = latest_data_upload
         source_dataset = (
             PRIMARY_EUROSTAT_DATASET
             if source == "Eurostat API"
@@ -292,6 +378,7 @@ def get_one_series(country_name, geo, spec):
             len(long),
             long["date"].min() if len(long) > 0 else None,
             long["date"].max() if len(long) > 0 else None,
+            latest_data_upload,
         )
 
     except Exception as exc:
@@ -333,6 +420,7 @@ def aggregate_for_charts(raw):
             n_indicators=("indicator", "nunique"),
             indicators=("indicator", lambda values: ", ".join(sorted(set(values)))),
             coicops=("coicop", lambda values: ", ".join(sorted(set(values)))),
+            latest_data_upload=("latest_data_upload", "max"),
         )
         .rename(columns={"month": "date"})
         .sort_values(["factor", "country", "date"])
@@ -348,22 +436,46 @@ def indicator_names_for_factor(factor):
     return ", ".join(indicators)
 
 
+def latest_upload_for_factor(chart_df, factor):
+    if chart_df.empty or "latest_data_upload" not in chart_df.columns:
+        return "Not available"
+
+    latest_upload = pd.to_datetime(
+        chart_df.loc[chart_df["factor"] == factor, "latest_data_upload"],
+        errors="coerce",
+    ).max()
+
+    if pd.isna(latest_upload):
+        return "Not available"
+
+    return latest_upload.strftime("%Y-%m-%d")
+
+
+def chart_header_html(factor, chart_df):
+    icon = FACTOR_ICONS.get(factor, "chart")
+    return f"""
+    <div class="chart-heading">
+        <span class="chart-icon icon-{escape(icon)}" aria-hidden="true"></span>
+        <div class="chart-title-block">
+            <h2>{escape(FACTORS[factor])}</h2>
+            <p>Indicator name: {escape(indicator_names_for_factor(factor))}</p>
+            <p>Latest data upload: {escape(latest_upload_for_factor(chart_df, factor))}</p>
+        </div>
+    </div>
+    <div class="chart-rule"></div>
+    """
+
+
 def make_plot(chart_df, factor):
     sub = chart_df[chart_df["factor"] == factor].copy()
     if sub.empty:
         return f'<p class="notice">{escape(FACTORS[factor])}: no data available.</p>'
-
-    title = (
-        f"{FACTORS[factor]}"
-        f"<br><sup>Indicator name: {indicator_names_for_factor(factor)}</sup>"
-    )
 
     fig = px.line(
         sub,
         x="date",
         y="value",
         color="country",
-        title=title,
         labels={
             "date": "Date",
             "value": "Year-over-year inflation, %",
@@ -380,7 +492,12 @@ def make_plot(chart_df, factor):
             "factor_label": False,
         },
     )
-    fig.update_layout(height=520, hovermode="x unified", legend_title_text="Country")
+    fig.update_layout(
+        height=500,
+        hovermode="x unified",
+        legend_title_text="Country",
+        margin={"t": 18, "r": 24, "b": 48, "l": 64},
+    )
     return fig.to_html(full_html=False, include_plotlyjs="cdn")
 
 
@@ -597,16 +714,21 @@ def index():
             max_date=lambda df: pd.to_datetime(
                 df["max_date"], errors="coerce"
             ).dt.strftime("%Y-%m-%d"),
+            latest_data_upload=lambda df: pd.to_datetime(
+                df["latest_data_upload"], errors="coerce"
+            ).dt.strftime("%Y-%m-%d"),
         ).rename(
             columns={
                 "country": "Country",
                 "factor": "Factor",
                 "indicator": "Indicator",
                 "coicop": "COICOP",
+                "coicop18": "COICOP18",
                 "status": "Status",
                 "n_rows": "Rows",
                 "min_date": "First date",
                 "max_date": "Latest date",
+                "latest_data_upload": "Latest data upload",
             }
         )
         status_html = f"""
@@ -648,7 +770,13 @@ def index():
                 latest_html = ""
             else:
                 charts_html = "\n".join(
-                    f"<section>{make_plot(chart_df, factor)}</section>" for factor in FACTORS
+                    (
+                        '<section class="chart-section">'
+                        f"{chart_header_html(factor, chart_df)}"
+                        f"{make_plot(chart_df, factor)}"
+                        "</section>"
+                    )
+                    for factor in FACTORS
                 )
                 data_table_html = f"""
                 <h2>Chart Data</h2>
@@ -717,12 +845,31 @@ def index():
                     background: white;
                 }}
                 header {{
+                    position: relative;
                     padding: 32px clamp(20px, 5vw, 64px) 20px;
                     border-bottom: 1px solid var(--line);
                 }}
                 h1 {{
                     margin: 0 0 8px;
                     font-size: clamp(28px, 4vw, 44px);
+                    letter-spacing: 0;
+                }}
+                .brand-logo {{
+                    position: absolute;
+                    top: 24px;
+                    right: clamp(20px, 5vw, 64px);
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    min-width: 86px;
+                    min-height: 34px;
+                    padding: 6px 12px;
+                    border: 2px solid #d71920;
+                    color: #d71920;
+                    background: #ffffff;
+                    font-size: 20px;
+                    font-weight: 900;
+                    line-height: 1;
                     letter-spacing: 0;
                 }}
                 main {{
@@ -847,6 +994,158 @@ def index():
                     padding: 8px 0 22px;
                     border-bottom: 1px solid var(--line);
                 }}
+                .chart-section {{
+                    padding-top: 22px;
+                }}
+                .chart-heading {{
+                    display: flex;
+                    align-items: flex-start;
+                    gap: 14px;
+                    margin-bottom: 10px;
+                }}
+                .chart-title-block h2 {{
+                    margin: 0 0 4px;
+                    font-size: 22px;
+                    font-weight: 800;
+                    letter-spacing: 0;
+                }}
+                .chart-title-block p {{
+                    margin: 0;
+                    color: var(--muted);
+                    font-size: 13px;
+                    line-height: 1.45;
+                }}
+                .chart-rule {{
+                    height: 4px;
+                    width: 100%;
+                    margin: 12px 0 12px;
+                    border-radius: 2px;
+                    background: linear-gradient(90deg, var(--accent), #dfe7ef);
+                }}
+                .chart-icon {{
+                    position: relative;
+                    display: inline-grid;
+                    place-items: center;
+                    flex: 0 0 38px;
+                    width: 38px;
+                    height: 38px;
+                    border: 1px solid var(--line);
+                    border-radius: 8px;
+                    background: #ffffff;
+                    color: var(--accent);
+                }}
+                .chart-icon::before,
+                .chart-icon::after {{
+                    content: "";
+                    position: absolute;
+                    display: block;
+                }}
+                .icon-chart::before {{
+                    left: 10px;
+                    bottom: 9px;
+                    width: 4px;
+                    height: 12px;
+                    background: currentColor;
+                    box-shadow: 7px -5px 0 currentColor, 14px -9px 0 currentColor;
+                }}
+                .icon-parts::before {{
+                    width: 18px;
+                    height: 18px;
+                    border: 3px solid currentColor;
+                    border-radius: 4px;
+                    transform: rotate(45deg);
+                }}
+                .icon-tools::before {{
+                    width: 20px;
+                    height: 4px;
+                    border-radius: 3px;
+                    background: currentColor;
+                    transform: rotate(-35deg);
+                }}
+                .icon-tools::after {{
+                    right: 8px;
+                    top: 9px;
+                    width: 8px;
+                    height: 8px;
+                    border: 3px solid currentColor;
+                    border-left-color: transparent;
+                    border-bottom-color: transparent;
+                    border-radius: 2px;
+                    transform: rotate(-35deg);
+                }}
+                .icon-medical::before {{
+                    width: 20px;
+                    height: 6px;
+                    border-radius: 2px;
+                    background: currentColor;
+                }}
+                .icon-medical::after {{
+                    width: 6px;
+                    height: 20px;
+                    border-radius: 2px;
+                    background: currentColor;
+                }}
+                .icon-energy::before {{
+                    width: 11px;
+                    height: 22px;
+                    background: currentColor;
+                    clip-path: polygon(58% 0, 18% 44%, 48% 44%, 32% 100%, 84% 35%, 54% 35%);
+                }}
+                .icon-home::before {{
+                    width: 20px;
+                    height: 16px;
+                    border: 3px solid currentColor;
+                    border-top: 0;
+                    bottom: 8px;
+                }}
+                .icon-home::after {{
+                    width: 17px;
+                    height: 17px;
+                    border-left: 3px solid currentColor;
+                    border-top: 3px solid currentColor;
+                    transform: rotate(45deg);
+                    top: 8px;
+                }}
+                .icon-materials::before {{
+                    width: 21px;
+                    height: 13px;
+                    border-radius: 2px;
+                    background: repeating-linear-gradient(
+                        90deg,
+                        currentColor 0 8px,
+                        transparent 8px 11px
+                    );
+                    box-shadow: 0 8px 0 -1px currentColor;
+                }}
+                .icon-worker::before {{
+                    top: 8px;
+                    width: 18px;
+                    height: 8px;
+                    border-radius: 8px 8px 2px 2px;
+                    background: currentColor;
+                }}
+                .icon-worker::after {{
+                    bottom: 8px;
+                    width: 18px;
+                    height: 14px;
+                    border: 3px solid currentColor;
+                    border-radius: 50% 50% 45% 45%;
+                }}
+                .icon-equipment::before {{
+                    width: 20px;
+                    height: 16px;
+                    border: 3px solid currentColor;
+                    border-radius: 4px;
+                }}
+                .icon-equipment::after {{
+                    right: 9px;
+                    top: 11px;
+                    width: 4px;
+                    height: 4px;
+                    border-radius: 50%;
+                    background: currentColor;
+                    box-shadow: 0 8px 0 currentColor;
+                }}
                 .notice {{
                     padding: 14px 16px;
                     border-radius: 8px;
@@ -919,6 +1218,13 @@ def index():
                     max-width: 190px;
                 }}
                 @media (max-width: 860px) {{
+                    header {{
+                        padding-top: 76px;
+                    }}
+                    .brand-logo {{
+                        left: 20px;
+                        right: auto;
+                    }}
                     main {{ grid-template-columns: 1fr; }}
                     aside {{ position: static; }}
                     .metrics {{ grid-template-columns: 1fr; }}
@@ -927,6 +1233,7 @@ def index():
         </head>
         <body>
             <header>
+                <div class="brand-logo" aria-label="ERGO logo">ERGO</div>
                 <h1>Global Claims CPI Dashboard</h1>
             </header>
             <main>
