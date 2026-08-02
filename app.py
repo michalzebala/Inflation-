@@ -354,6 +354,9 @@ def parse_period(period):
     if re.match(r"^\d{4}Q[1-4]$", value):
         return pd.Period(value, freq="Q").to_timestamp()
 
+    if re.match(r"^\d{4}-Q[1-4]$", value):
+        return pd.Period(value.replace("-Q", "Q"), freq="Q").to_timestamp()
+
     if re.match(r"^\d{4}$", value):
         return pd.to_datetime(value + "-01-01", errors="coerce")
 
@@ -573,16 +576,20 @@ def fetch_imf_series(country_code, spec):
 
     start_period = (START_DATE - pd.DateOffset(months=13)).strftime("%Y-%m")
     end_period = pd.Timestamp.today().normalize().strftime("%Y-%m")
-    candidates = [
-        f"https://{IMF_SDMX_BASE}/CPI/M.{country_code}.{indicator}",
-        f"http://{IMF_SDMX_BASE}/CPI/M.{country_code}.{indicator}",
-        f"https://{IMF_SDMX_BASE}/IFS/M.{country_code}.{indicator}",
-        f"http://{IMF_SDMX_BASE}/IFS/M.{country_code}.{indicator}",
-    ]
+    candidates = []
+    for frequency in ["M", "Q"]:
+        for dataset in ["CPI", "IFS"]:
+            for scheme in ["https", "http"]:
+                candidates.append(
+                    {
+                        "frequency": frequency,
+                        "url": f"{scheme}://{IMF_SDMX_BASE}/{dataset}/{frequency}.{country_code}.{indicator}",
+                    }
+                )
     latest_error = "empty IMF response"
 
-    for base_url in candidates:
-        url = f"{base_url}?startPeriod={start_period}&endPeriod={end_period}"
+    for candidate in candidates:
+        url = f"{candidate['url']}?startPeriod={start_period}&endPeriod={end_period}"
         try:
             payload, latest_data_upload = fetch_json(url)
         except Exception as exc:
@@ -604,6 +611,9 @@ def fetch_imf_series(country_code, spec):
                 )
 
         data = calculate_yoy_from_index(records)
+        if candidate["frequency"] == "Q" and not data.empty:
+            data = expand_quarterly_to_monthly(data)
+
         if not data.empty:
             return data, latest_data_upload, "ok"
 
@@ -686,6 +696,37 @@ def enrich_with_official_headline_releases(country_name, spec, long):
         .sort_values("date")
     )
     return combined
+
+
+def combine_series(primary, fallback):
+    if primary.empty:
+        return fallback
+    if fallback.empty:
+        return primary
+
+    combined = pd.concat([fallback, primary], ignore_index=True)
+    combined["date"] = pd.to_datetime(combined["date"])
+    combined = (
+        combined.sort_values("date")
+        .drop_duplicates(subset=["date"], keep="last")
+        .sort_values("date")
+    )
+    return combined
+
+
+def expand_quarterly_to_monthly(df):
+    if df.empty:
+        return df
+
+    expanded = []
+    for _, row in df.iterrows():
+        quarter_start = pd.Timestamp(row["date"]).to_period("Q").start_time
+        for offset in range(3):
+            expanded_row = row.copy()
+            expanded_row["date"] = quarter_start + pd.DateOffset(months=offset)
+            expanded.append(expanded_row)
+
+    return pd.DataFrame(expanded).sort_values("date")
 
 
 def calculate_yoy_from_index(records):
@@ -1045,7 +1086,19 @@ def load_data(selected_countries, cache_day):
             else:
                 df, status = get_imf_series(country_name, geo, spec)
 
+            if country_name not in EUROSTAT_COUNTRIES and spec.get("imf_indicator"):
+                fallback_df, fallback_status = get_imf_series(country_name, geo, spec)
+                df = combine_series(df, fallback_df)
+                if not df.empty and status.get("status") != "ok":
+                    status = fallback_status
+
             if country_name in OFFICIAL_HEADLINE_RELEASES and spec["factor"] == "headline":
+                if df.empty or df["date"].min() > START_DATE + pd.DateOffset(months=6):
+                    fallback_df, fallback_status = get_imf_series(country_name, geo, spec)
+                    df = combine_series(df, fallback_df)
+                    if not fallback_df.empty:
+                        status = fallback_status
+
                 df = enrich_with_official_headline_releases(country_name, spec, df)
                 if not df.empty:
                     status = build_status(
@@ -1410,7 +1463,7 @@ def chart_insight_html(chart_df, factor, generate_insights):
     return """
     <div class="chart-insight">
         <strong>Insights</strong>
-        <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Integer facilisis, justo at dictum varius, lorem arcu porta mi, vitae luctus massa neque at neque.</p>
+        <p>Insights have not been generated yet. Use the Generate insights button after loading the charts.</p>
     </div>
     """
 
@@ -1817,9 +1870,6 @@ def index():
                     --selector-red-line: #f0b8bb;
                 }}
                 * {{ box-sizing: border-box; }}
-                html {{
-                    zoom: 0.8;
-                }}
                 body {{
                     margin: 0;
                     font-family: Inter, Segoe UI, Arial, sans-serif;
