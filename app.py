@@ -28,6 +28,33 @@ COUNTRIES = {
     "Estonia": "EE",
     "Lithuania": "LT",
     "Latvia": "LV",
+    "Thailand": "TH",
+    "Singapore": "SG",
+    "India": "IN",
+}
+
+EUROSTAT_COUNTRIES = {"Poland", "Germany", "Austria", "Greece", "Estonia", "Lithuania", "Latvia"}
+IMF_COUNTRIES = {"Thailand", "Singapore", "India"}
+
+SINGSTAT_ROW_PATTERNS = {
+    "headline": ["all items"],
+    "medical": ["health care", "health"],
+    "fuel_energy": ["housing & utilities", "housing and utilities"],
+    "property_repair": ["housing & utilities", "housing and utilities"],
+    "property_materials": ["household durables", "household equipment"],
+    "property_services": ["housing & utilities", "housing and utilities"],
+    "household_equipment": ["household durables", "household equipment"],
+}
+
+THAILAND_MOC_ENDPOINTS = {
+    "headline": {
+        "endpoint": "cpig-indexes",
+        "label": "Consumer Price Index, All items",
+    },
+    "property_materials": {
+        "endpoint": "csi-indexes",
+        "label": "Construction Materials Price Index",
+    },
 }
 
 FACTORS = {
@@ -61,6 +88,8 @@ SERIES = [
         "indicator": "All-items HICP",
         "coicop": "CP00",
         "coicop18": "TOTAL",
+        "imf_indicator": "PCPI_IX",
+        "imf_indicator_label": "Consumer Price Index, All items",
     },
     {
         "factor": "parts",
@@ -68,6 +97,8 @@ SERIES = [
         "indicator": "Spare parts and accessories for vehicles",
         "coicop": "CP0721",
         "coicop18": "CP0721",
+        "imf_indicator": None,
+        "imf_indicator_label": None,
     },
     {
         "factor": "labor",
@@ -75,6 +106,8 @@ SERIES = [
         "indicator": "Maintenance and repair of vehicles",
         "coicop": "CP0723",
         "coicop18": "CP0723",
+        "imf_indicator": None,
+        "imf_indicator_label": None,
     },
     {
         "factor": "medical",
@@ -82,6 +115,8 @@ SERIES = [
         "indicator": "Health",
         "coicop": "CP06",
         "coicop18": "CP06",
+        "imf_indicator": "PCPIM_IX",
+        "imf_indicator_label": "Health",
     },
     {
         "factor": "fuel_energy",
@@ -89,6 +124,8 @@ SERIES = [
         "indicator": "Fuels and lubricants for personal transport",
         "coicop": "CP0722",
         "coicop18": "CP0722",
+        "imf_indicator": "PCPIH_IX",
+        "imf_indicator_label": "Housing, Water, Electricity, Gas and Other Fuels",
     },
     {
         "factor": "fuel_energy",
@@ -96,6 +133,8 @@ SERIES = [
         "indicator": "Electricity, gas and other fuels",
         "coicop": "CP045",
         "coicop18": "CP045",
+        "imf_indicator": None,
+        "imf_indicator_label": None,
     },
     {
         "factor": "fuel_energy",
@@ -103,6 +142,8 @@ SERIES = [
         "indicator": "Energy aggregate",
         "coicop": "NRG",
         "coicop18": "NRG",
+        "imf_indicator": None,
+        "imf_indicator_label": None,
     },
     {
         "factor": "property_repair",
@@ -110,6 +151,8 @@ SERIES = [
         "indicator": "Maintenance, repair and security of the dwelling",
         "coicop": "CP043",
         "coicop18": "CP043",
+        "imf_indicator": "PCPIH_IX",
+        "imf_indicator_label": "Housing, Water, Electricity, Gas and Other Fuels",
     },
     {
         "factor": "property_materials",
@@ -117,6 +160,8 @@ SERIES = [
         "indicator": "Security equipment and materials for dwelling maintenance and repair",
         "coicop": "CP0431",
         "coicop18": "CP0431",
+        "imf_indicator": None,
+        "imf_indicator_label": None,
     },
     {
         "factor": "property_materials",
@@ -124,6 +169,8 @@ SERIES = [
         "indicator": "Materials for the maintenance and repair of the dwelling",
         "coicop": "CP04311",
         "coicop18": "CP04311",
+        "imf_indicator": None,
+        "imf_indicator_label": None,
     },
     {
         "factor": "property_services",
@@ -131,6 +178,8 @@ SERIES = [
         "indicator": "Services for the maintenance, repair and security of the dwelling",
         "coicop": "CP0432",
         "coicop18": "CP0432",
+        "imf_indicator": None,
+        "imf_indicator_label": None,
     },
     {
         "factor": "property_services",
@@ -138,6 +187,8 @@ SERIES = [
         "indicator": "Services for the maintenance, repair and security of the dwelling",
         "coicop": "CP04320",
         "coicop18": "CP04320",
+        "imf_indicator": None,
+        "imf_indicator_label": None,
     },
     {
         "factor": "household_equipment",
@@ -145,6 +196,8 @@ SERIES = [
         "indicator": "Furnishings, household equipment and routine household maintenance",
         "coicop": "CP05",
         "coicop18": "CP05",
+        "imf_indicator": "PCPIHO_IX",
+        "imf_indicator_label": "Furnishings, household equipment and routine household maintenance",
     },
 ]
 
@@ -153,8 +206,12 @@ START_DATE = pd.Timestamp.today().normalize() - pd.DateOffset(years=DEFAULT_YEAR
 EUROSTAT_API_BASE = (
     "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/"
 )
+IMF_API_BASE = "https://dataservices.imf.org/REST/SDMX_JSON.svc/CompactData/CPI"
+SINGSTAT_API_BASE = "https://tablebuilder.singstat.gov.sg/api/table/tabledata"
+THAILAND_MOC_API_BASE = "https://dataapi.moc.go.th"
 PRIMARY_EUROSTAT_DATASET = "prc_hicp_minr"
 FALLBACK_EUROSTAT_DATASET = "prc_hicp_manr"
+SINGSTAT_CPI_RESOURCE_ID = "M213751"
 
 
 def is_time_column(col):
@@ -268,6 +325,17 @@ def parse_upload_date(value):
     return timestamp.normalize()
 
 
+def parse_calendar_date(value):
+    if not value:
+        return pd.NaT
+
+    parsed = pd.to_datetime(value, dayfirst=True, errors="coerce")
+    if pd.isna(parsed):
+        return pd.NaT
+
+    return pd.Timestamp(parsed).normalize()
+
+
 def jsonstat_time_series(payload):
     dimensions = payload.get("dimension", {})
     dimension_ids = payload.get("id", [])
@@ -343,7 +411,179 @@ def fetch_eurostat_package_series(geo, spec):
     return melt_eurostat(raw), pd.NaT
 
 
-def get_one_series(country_name, geo, spec):
+def normalize_imf_series(series):
+    if not series:
+        return []
+
+    return series if isinstance(series, list) else [series]
+
+
+def fetch_imf_series(country_code, spec):
+    indicator = spec.get("imf_indicator")
+    if not indicator:
+        return pd.DataFrame(), pd.NaT, "not available from IMF CPI source"
+
+    start_period = (START_DATE - pd.DateOffset(months=13)).strftime("%Y-%m")
+    end_period = pd.Timestamp.today().normalize().strftime("%Y-%m")
+    url = (
+        f"{IMF_API_BASE}/M.{country_code}.{indicator}"
+        f"?startPeriod={start_period}&endPeriod={end_period}"
+    )
+
+    with urlopen(url, timeout=30) as response:
+        latest_data_upload = parse_upload_date(response.headers.get("Last-Modified"))
+        payload = json.loads(response.read().decode("utf-8"))
+
+    series = payload.get("CompactData", {}).get("DataSet", {}).get("Series")
+    records = []
+
+    for item in normalize_imf_series(series):
+        observations = item.get("Obs", [])
+        observations = observations if isinstance(observations, list) else [observations]
+        for obs in observations:
+            records.append(
+                {
+                    "date": parse_period(obs.get("@TIME_PERIOD")),
+                    "index_value": obs.get("@OBS_VALUE"),
+                }
+            )
+
+    if not records:
+        return pd.DataFrame(), latest_data_upload, "empty IMF response"
+
+    index_df = pd.DataFrame(records)
+    index_df["index_value"] = pd.to_numeric(index_df["index_value"], errors="coerce")
+    index_df = index_df.dropna(subset=["date", "index_value"]).sort_values("date")
+    index_df["value"] = index_df["index_value"].pct_change(periods=12) * 100
+    index_df = index_df[index_df["date"] >= START_DATE].dropna(subset=["value"])
+
+    return index_df[["date", "value"]], latest_data_upload, "ok"
+
+
+def calculate_yoy_from_index(records):
+    if not records:
+        return pd.DataFrame()
+
+    index_df = pd.DataFrame(records)
+    index_df["index_value"] = pd.to_numeric(index_df["index_value"], errors="coerce")
+    index_df = index_df.dropna(subset=["date", "index_value"]).sort_values("date")
+    index_df["value"] = index_df["index_value"].pct_change(periods=12) * 100
+    index_df = index_df[index_df["date"] >= START_DATE].dropna(subset=["value"])
+    return index_df[["date", "value"]]
+
+
+def flatten_singstat_rows(rows):
+    flattened = []
+    for row in rows or []:
+        flattened.append(row)
+        flattened.extend(flatten_singstat_rows(row.get("children")))
+    return flattened
+
+
+def singstat_row_matches(row_text, patterns):
+    normalized = str(row_text).lower()
+    return any(pattern in normalized for pattern in patterns)
+
+
+@functools.lru_cache(maxsize=16)
+def fetch_singstat_table(cache_hour):
+    url = f"{SINGSTAT_API_BASE}/{SINGSTAT_CPI_RESOURCE_ID}"
+    with urlopen(url, timeout=30) as response:
+        latest_data_upload = parse_upload_date(response.headers.get("Last-Modified"))
+        payload = json.loads(response.read().decode("utf-8"))
+
+    payload_upload = parse_calendar_date(payload.get("Data", {}).get("dataLastUpdated"))
+    if not pd.isna(payload_upload):
+        latest_data_upload = payload_upload
+
+    rows = payload.get("Data", {}).get("row") or payload.get("data", {}).get("row") or []
+    return payload, latest_data_upload, rows
+
+
+def fetch_singapore_official_series(spec, cache_hour):
+    patterns = SINGSTAT_ROW_PATTERNS.get(spec["factor"])
+    if not patterns:
+        return pd.DataFrame(), pd.NaT, "not available from SingStat CPI source", None
+
+    payload, latest_data_upload, rows = fetch_singstat_table(cache_hour)
+    matched_row = None
+    for row in flatten_singstat_rows(rows):
+        row_text = row.get("rowText") or row.get("rowTitle") or row.get("name")
+        if singstat_row_matches(row_text, patterns):
+            matched_row = row
+            break
+
+    if not matched_row:
+        return pd.DataFrame(), latest_data_upload, "not available from SingStat CPI source", None
+
+    records = []
+    for column in matched_row.get("columns", []) or matched_row.get("column", []):
+        date_value = parse_month_text(column.get("key") or column.get("name"))
+        if date_value is None:
+            continue
+        records.append({"date": date_value, "index_value": column.get("value")})
+
+    data = calculate_yoy_from_index(records)
+    if data.empty:
+        return pd.DataFrame(), latest_data_upload, "empty SingStat response", None
+
+    row_label = matched_row.get("rowText") or matched_row.get("rowTitle") or "SingStat CPI"
+    return data, latest_data_upload, "ok", row_label
+
+
+def fetch_thailand_moc_series(spec):
+    config = THAILAND_MOC_ENDPOINTS.get(spec["factor"])
+    if not config:
+        return pd.DataFrame(), pd.NaT, "not available from Thailand MOC source", None
+
+    start_year = START_DATE.year - 1
+    end_year = pd.Timestamp.today().year
+    params = urlencode(
+        {
+            "region_id": "5",
+            "index_id": "0000000000000000",
+            "from_year": start_year,
+            "to_year": end_year,
+        }
+    )
+    url = f"{THAILAND_MOC_API_BASE}/{config['endpoint']}?{params}"
+
+    with urlopen(url, timeout=30) as response:
+        latest_data_upload = parse_upload_date(response.headers.get("Last-Modified"))
+        payload = json.loads(response.read().decode("utf-8"))
+
+    rows = payload if isinstance(payload, list) else payload.get("data", [])
+    records = []
+    yoy_records = []
+    for row in rows:
+        year = row.get("year") or row.get("base_year")
+        month = row.get("month") or row.get("month_no") or row.get("period")
+        index_value = (
+            row.get("index")
+            or row.get("index_value")
+            or row.get("value")
+            or row.get("price_index")
+        )
+        if not year or not month:
+            continue
+        date_value = parse_month(f"{int(year):04d}-{int(month):02d}")
+        if row.get("yoy") is not None:
+            yoy_records.append({"date": date_value, "value": row.get("yoy")})
+        records.append({"date": date_value, "index_value": index_value})
+
+    if yoy_records:
+        data = pd.DataFrame(yoy_records)
+        data["value"] = pd.to_numeric(data["value"], errors="coerce")
+        data = data[data["date"] >= START_DATE].dropna(subset=["date", "value"])
+    else:
+        data = calculate_yoy_from_index(records)
+    if data.empty:
+        return pd.DataFrame(), latest_data_upload, "empty Thailand MOC response", None
+
+    return data, latest_data_upload, "ok", config["label"]
+
+
+def get_eurostat_series(country_name, geo, spec):
     try:
         source = "Eurostat API"
         try:
@@ -385,6 +625,90 @@ def get_one_series(country_name, geo, spec):
         return pd.DataFrame(), build_status(country_name, spec, f"error: {exc}")
 
 
+def get_imf_series(country_name, country_code, spec):
+    try:
+        long, latest_data_upload, status = fetch_imf_series(country_code, spec)
+
+        if long.empty:
+            return pd.DataFrame(), build_status(
+                country_name,
+                spec,
+                status,
+                latest_data_upload=latest_data_upload,
+            )
+
+        indicator = spec["imf_indicator_label"] or spec["indicator"]
+        long["country"] = country_name
+        long["geo"] = country_code
+        long["factor"] = spec["factor"]
+        long["factor_label"] = spec["factor_label"]
+        long["indicator"] = indicator
+        long["coicop"] = spec["coicop"]
+        long["coicop18"] = spec["coicop18"]
+        long["latest_data_upload"] = latest_data_upload
+        long["source"] = "IMF CPI CompactData"
+
+        return long, build_status(
+            country_name,
+            {**spec, "indicator": indicator},
+            "ok",
+            len(long),
+            long["date"].min(),
+            long["date"].max(),
+            latest_data_upload,
+        )
+
+    except Exception as exc:
+        return pd.DataFrame(), build_status(country_name, spec, f"error: {exc}")
+
+
+def get_local_official_series(country_name, country_code, spec, cache_hour):
+    try:
+        if country_name == "Singapore":
+            long, latest_data_upload, status, indicator_label = fetch_singapore_official_series(
+                spec,
+                cache_hour,
+            )
+            source = "SingStat Table Builder API"
+        elif country_name == "Thailand":
+            long, latest_data_upload, status, indicator_label = fetch_thailand_moc_series(spec)
+            source = "Thailand Ministry of Commerce Open Data API"
+        else:
+            return get_imf_series(country_name, country_code, spec)
+
+        if long.empty:
+            return pd.DataFrame(), build_status(
+                country_name,
+                spec,
+                status,
+                latest_data_upload=latest_data_upload,
+            )
+
+        indicator = indicator_label or spec["indicator"]
+        long["country"] = country_name
+        long["geo"] = country_code
+        long["factor"] = spec["factor"]
+        long["factor_label"] = spec["factor_label"]
+        long["indicator"] = indicator
+        long["coicop"] = spec["coicop"]
+        long["coicop18"] = spec["coicop18"]
+        long["latest_data_upload"] = latest_data_upload
+        long["source"] = source
+
+        return long, build_status(
+            country_name,
+            {**spec, "indicator": indicator},
+            "ok",
+            len(long),
+            long["date"].min(),
+            long["date"].max(),
+            latest_data_upload,
+        )
+
+    except Exception:
+        return get_imf_series(country_name, country_code, spec)
+
+
 @functools.lru_cache(maxsize=32)
 def load_data(selected_countries, cache_day):
     frames = []
@@ -393,7 +717,12 @@ def load_data(selected_countries, cache_day):
     for country_name in selected_countries:
         geo = COUNTRIES[country_name]
         for spec in SERIES:
-            df, status = get_one_series(country_name, geo, spec)
+            if country_name in EUROSTAT_COUNTRIES:
+                df, status = get_eurostat_series(country_name, geo, spec)
+            elif country_name in {"Thailand", "Singapore"}:
+                df, status = get_local_official_series(country_name, geo, spec, cache_day)
+            else:
+                df, status = get_imf_series(country_name, geo, spec)
             statuses.append(status)
             if not df.empty:
                 frames.append(df)
@@ -418,8 +747,8 @@ def aggregate_for_charts(raw):
         .agg(
             value=("value", "mean"),
             n_indicators=("indicator", "nunique"),
-            indicators=("indicator", lambda values: ", ".join(sorted(set(values)))),
-            coicops=("coicop", lambda values: ", ".join(sorted(set(values)))),
+            indicators=("indicator", lambda values: " | ".join(sorted(set(values)))),
+            coicops=("coicop", lambda values: " | ".join(sorted(set(values)))),
             latest_data_upload=("latest_data_upload", "max"),
         )
         .rename(columns={"month": "date"})
@@ -427,12 +756,35 @@ def aggregate_for_charts(raw):
     )
 
 
-def indicator_names_for_factor(factor):
-    indicators = [
-        spec["indicator"]
-        for spec in SERIES
-        if spec["factor"] == factor
-    ]
+def unavailable_country_notes(status_df):
+    if status_df.empty:
+        return {}
+
+    notes = {}
+    unavailable = status_df[status_df["status"] != "ok"].copy()
+
+    if unavailable.empty:
+        return notes
+
+    for factor, group in unavailable.groupby("factor"):
+        countries = sorted(group["country"].dropna().unique())
+        if countries:
+            notes[factor] = ", ".join(countries)
+
+    return notes
+
+
+def indicator_names_for_factor(factor, chart_df=None):
+    if chart_df is not None and not chart_df.empty and "indicators" in chart_df.columns:
+        indicator_values = chart_df.loc[chart_df["factor"] == factor, "indicators"].dropna()
+        indicators = []
+        for value in indicator_values:
+            indicators.extend([item.strip() for item in str(value).split(" | ") if item.strip()])
+        indicators = sorted(set(indicators))
+        if indicators:
+            return ", ".join(indicators)
+
+    indicators = [spec["indicator"] for spec in SERIES if spec["factor"] == factor]
     return ", ".join(indicators)
 
 
@@ -508,14 +860,39 @@ def latest_upload_for_factor(chart_df, factor):
     return latest_upload.strftime("%Y-%m-%d")
 
 
-def chart_header_html(factor, chart_df):
+def latest_visible_observation_for_factor(chart_df, factor):
+    if chart_df.empty:
+        return "Not available"
+
+    latest_observation = pd.to_datetime(
+        chart_df.loc[chart_df["factor"] == factor, "date"],
+        errors="coerce",
+    ).max()
+
+    if pd.isna(latest_observation):
+        return "Not available"
+
+    return latest_observation.strftime("%B %Y")
+
+
+def chart_header_html(factor, chart_df, unavailable_notes):
     icon = FACTOR_ICONS.get(factor, "chart")
+    unavailable_note = ""
+    if factor in unavailable_notes:
+        unavailable_note = (
+            '<p class="availability-note">'
+            f"(Data not available for: {escape(unavailable_notes[factor])})"
+            "</p>"
+        )
+
     return f"""
     <div class="chart-heading">
         <span class="chart-icon">{icon_svg(icon)}</span>
         <div class="chart-title-block">
             <h2>{escape(FACTORS[factor])}</h2>
-            <p>Indicator name: {escape(indicator_names_for_factor(factor))}</p>
+            <p>Indicator name: {escape(indicator_names_for_factor(factor, chart_df))}</p>
+            <p>Latest visible observation: {escape(latest_visible_observation_for_factor(chart_df, factor))}</p>
+            {unavailable_note}
         </div>
     </div>
     <div class="chart-rule"></div>
@@ -581,6 +958,13 @@ def parse_month(value):
     if pd.isna(parsed):
         return None
 
+    return parsed.to_period("M").to_timestamp()
+
+
+def parse_month_text(value):
+    parsed = pd.to_datetime(str(value), errors="coerce")
+    if pd.isna(parsed):
+        return None
     return parsed.to_period("M").to_timestamp()
 
 
@@ -825,6 +1209,7 @@ def index():
 
             visible_raw = filter_to_month_range(raw, start_month, end_month)
             chart_df = aggregate_for_charts(visible_raw)
+            unavailable_notes = unavailable_country_notes(status_df)
 
             if chart_df.empty:
                 charts_html = '<p class="notice">No data is available for the selected range.</p>'
@@ -837,7 +1222,7 @@ def index():
                 charts_html = "\n".join(
                     (
                         '<section class="chart-section">'
-                        f"{chart_header_html(factor, chart_df)}"
+                        f"{chart_header_html(factor, chart_df, unavailable_notes)}"
                         f"{make_plot(chart_df, factor)}"
                         f"{chart_insight_html()}"
                         "</section>"
@@ -906,6 +1291,9 @@ def index():
                     --accent-soft: #ffe3e4;
                 }}
                 * {{ box-sizing: border-box; }}
+                html {{
+                    zoom: 0.8;
+                }}
                 body {{
                     margin: 0;
                     font-family: Inter, Segoe UI, Arial, sans-serif;
@@ -1086,6 +1474,11 @@ def index():
                     color: var(--muted);
                     font-size: 13px;
                     line-height: 1.45;
+                }}
+                .chart-title-block .availability-note {{
+                    margin-top: 2px;
+                    font-size: 12px;
+                    color: #8a4b4f;
                 }}
                 .chart-rule {{
                     height: 4px;
