@@ -43,15 +43,15 @@ FACTORS = {
 }
 
 FACTOR_ICONS = {
-    "headline": "chart",
-    "parts": "parts",
-    "labor": "tools",
-    "medical": "medical",
-    "fuel_energy": "energy",
+    "headline": "bar-chart-3",
+    "parts": "component",
+    "labor": "wrench",
+    "medical": "heart-pulse",
+    "fuel_energy": "zap",
     "property_repair": "home",
-    "property_materials": "materials",
-    "property_services": "worker",
-    "household_equipment": "equipment",
+    "property_materials": "brick-wall",
+    "property_services": "hard-hat",
+    "household_equipment": "washing-machine",
 }
 
 SERIES = [
@@ -436,6 +436,63 @@ def indicator_names_for_factor(factor):
     return ", ".join(indicators)
 
 
+def icon_svg(icon_name):
+    icons = {
+        "bar-chart-3": """
+            <path d="M3 3v18h18"/>
+            <path d="M18 17V9"/>
+            <path d="M13 17V5"/>
+            <path d="M8 17v-3"/>
+        """,
+        "component": """
+            <path d="M5.5 8.5 9 5l3.5 3.5L9 12z"/>
+            <path d="m12 12 3.5-3.5L19 12l-3.5 3.5z"/>
+            <path d="M5.5 15.5 9 12l3.5 3.5L9 19z"/>
+        """,
+        "wrench": """
+            <path d="M14.7 6.3a4 4 0 0 0-5 5L3.8 17.2a2.1 2.1 0 0 0 3 3l5.9-5.9a4 4 0 0 0 5-5l-2.6 2.6-3-3z"/>
+        """,
+        "heart-pulse": """
+            <path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.6l-1-1a5.5 5.5 0 1 0-7.8 7.8l1 1"/>
+            <path d="M4 13h4l2-4 4 8 2-4h4"/>
+            <path d="m18.8 13.4-6.8 6.8-3-3"/>
+        """,
+        "zap": """
+            <path d="M13 2 4 14h7l-1 8 9-12h-7z"/>
+        """,
+        "home": """
+            <path d="m3 11 9-8 9 8"/>
+            <path d="M5 10v10h14V10"/>
+            <path d="M9 20v-6h6v6"/>
+        """,
+        "brick-wall": """
+            <path d="M3 6h18v12H3z"/>
+            <path d="M3 12h18"/>
+            <path d="M9 6v6"/>
+            <path d="M15 12v6"/>
+        """,
+        "hard-hat": """
+            <path d="M2 18h20"/>
+            <path d="M4 18a8 8 0 0 1 16 0"/>
+            <path d="M9 10v8"/>
+            <path d="M15 10v8"/>
+            <path d="M8 6h8"/>
+        """,
+        "washing-machine": """
+            <rect x="5" y="2" width="14" height="20" rx="2"/>
+            <circle cx="12" cy="14" r="5"/>
+            <path d="M8 6h.01"/>
+            <path d="M11 6h5"/>
+        """,
+    }
+    paths = icons.get(icon_name, icons["bar-chart-3"])
+    return f"""
+    <svg class="chart-icon-svg" viewBox="0 0 24 24" aria-hidden="true">
+        {paths}
+    </svg>
+    """
+
+
 def latest_upload_for_factor(chart_df, factor):
     if chart_df.empty or "latest_data_upload" not in chart_df.columns:
         return "Not available"
@@ -455,11 +512,10 @@ def chart_header_html(factor, chart_df):
     icon = FACTOR_ICONS.get(factor, "chart")
     return f"""
     <div class="chart-heading">
-        <span class="chart-icon icon-{escape(icon)}" aria-hidden="true"></span>
+        <span class="chart-icon">{icon_svg(icon)}</span>
         <div class="chart-title-block">
             <h2>{escape(FACTORS[factor])}</h2>
             <p>Indicator name: {escape(indicator_names_for_factor(factor))}</p>
-            <p>Latest data upload: {escape(latest_upload_for_factor(chart_df, factor))}</p>
         </div>
     </div>
     <div class="chart-rule"></div>
@@ -499,6 +555,15 @@ def make_plot(chart_df, factor):
         margin={"t": 18, "r": 24, "b": 48, "l": 64},
     )
     return fig.to_html(full_html=False, include_plotlyjs="cdn")
+
+
+def chart_insight_html():
+    return """
+    <div class="chart-insight">
+        <strong>Insight</strong>
+        <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Integer facilisis, justo at dictum varius, lorem arcu porta mi, vitae luctus massa neque at neque.</p>
+    </div>
+    """
 
 
 def selected_countries_from_request():
@@ -774,6 +839,7 @@ def index():
                         '<section class="chart-section">'
                         f"{chart_header_html(factor, chart_df)}"
                         f"{make_plot(chart_df, factor)}"
+                        f"{chart_insight_html()}"
                         "</section>"
                     )
                     for factor in FACTORS
@@ -834,8 +900,10 @@ def index():
                     --ink: #17202a;
                     --muted: #607080;
                     --line: #d9e0e7;
-                    --panel: #f6f8fa;
-                    --accent: #1769aa;
+                    --panel: #fff6f6;
+                    --accent: #d71920;
+                    --accent-dark: #a80f17;
+                    --accent-soft: #ffe3e4;
                 }}
                 * {{ box-sizing: border-box; }}
                 body {{
@@ -847,7 +915,7 @@ def index():
                 header {{
                     position: relative;
                     padding: 32px clamp(20px, 5vw, 64px) 20px;
-                    border-bottom: 1px solid var(--line);
+                    border-bottom: 3px solid var(--accent);
                 }}
                 h1 {{
                     margin: 0 0 8px;
@@ -883,8 +951,8 @@ def index():
                     position: sticky;
                     top: 20px;
                     padding: 18px;
-                    background: var(--panel);
-                    border: 1px solid var(--line);
+                    background: #ffffff;
+                    border: 1px solid #f0b8bb;
                     border-radius: 8px;
                 }}
                 fieldset {{
@@ -941,6 +1009,10 @@ def index():
                     font-weight: 700;
                     cursor: pointer;
                 }}
+                button:hover {{
+                    background: var(--accent-dark);
+                    border-color: var(--accent-dark);
+                }}
                 button[aria-busy="true"] {{
                     opacity: 0.78;
                     cursor: progress;
@@ -976,9 +1048,9 @@ def index():
                     align-items: center;
                     gap: 8px;
                     padding: 8px 10px;
-                    border: 1px solid var(--line);
+                    border: 1px solid #f0b8bb;
                     border-radius: 6px;
-                    background: var(--panel);
+                    background: var(--accent-soft);
                 }}
                 .metrics strong {{
                     display: inline;
@@ -1020,7 +1092,7 @@ def index():
                     width: 100%;
                     margin: 12px 0 12px;
                     border-radius: 2px;
-                    background: linear-gradient(90deg, var(--accent), #dfe7ef);
+                    background: linear-gradient(90deg, var(--accent), #f6b1b5);
                 }}
                 .chart-icon {{
                     position: relative;
@@ -1029,127 +1101,43 @@ def index():
                     flex: 0 0 38px;
                     width: 38px;
                     height: 38px;
-                    border: 1px solid var(--line);
+                    border: 1px solid #f0b8bb;
                     border-radius: 8px;
-                    background: #ffffff;
+                    background: var(--accent-soft);
                     color: var(--accent);
                 }}
-                .chart-icon::before,
-                .chart-icon::after {{
-                    content: "";
-                    position: absolute;
-                    display: block;
-                }}
-                .icon-chart::before {{
-                    left: 10px;
-                    bottom: 9px;
-                    width: 4px;
-                    height: 12px;
-                    background: currentColor;
-                    box-shadow: 7px -5px 0 currentColor, 14px -9px 0 currentColor;
-                }}
-                .icon-parts::before {{
-                    width: 18px;
-                    height: 18px;
-                    border: 3px solid currentColor;
-                    border-radius: 4px;
-                    transform: rotate(45deg);
-                }}
-                .icon-tools::before {{
-                    width: 20px;
-                    height: 4px;
-                    border-radius: 3px;
-                    background: currentColor;
-                    transform: rotate(-35deg);
-                }}
-                .icon-tools::after {{
-                    right: 8px;
-                    top: 9px;
-                    width: 8px;
-                    height: 8px;
-                    border: 3px solid currentColor;
-                    border-left-color: transparent;
-                    border-bottom-color: transparent;
-                    border-radius: 2px;
-                    transform: rotate(-35deg);
-                }}
-                .icon-medical::before {{
-                    width: 20px;
-                    height: 6px;
-                    border-radius: 2px;
-                    background: currentColor;
-                }}
-                .icon-medical::after {{
-                    width: 6px;
-                    height: 20px;
-                    border-radius: 2px;
-                    background: currentColor;
-                }}
-                .icon-energy::before {{
-                    width: 11px;
+                .chart-icon-svg {{
+                    width: 22px;
                     height: 22px;
-                    background: currentColor;
-                    clip-path: polygon(58% 0, 18% 44%, 48% 44%, 32% 100%, 84% 35%, 54% 35%);
-                }}
-                .icon-home::before {{
-                    width: 20px;
-                    height: 16px;
-                    border: 3px solid currentColor;
-                    border-top: 0;
-                    bottom: 8px;
-                }}
-                .icon-home::after {{
-                    width: 17px;
-                    height: 17px;
-                    border-left: 3px solid currentColor;
-                    border-top: 3px solid currentColor;
-                    transform: rotate(45deg);
-                    top: 8px;
-                }}
-                .icon-materials::before {{
-                    width: 21px;
-                    height: 13px;
-                    border-radius: 2px;
-                    background: repeating-linear-gradient(
-                        90deg,
-                        currentColor 0 8px,
-                        transparent 8px 11px
-                    );
-                    box-shadow: 0 8px 0 -1px currentColor;
-                }}
-                .icon-worker::before {{
-                    top: 8px;
-                    width: 18px;
-                    height: 8px;
-                    border-radius: 8px 8px 2px 2px;
-                    background: currentColor;
-                }}
-                .icon-worker::after {{
-                    bottom: 8px;
-                    width: 18px;
-                    height: 14px;
-                    border: 3px solid currentColor;
-                    border-radius: 50% 50% 45% 45%;
-                }}
-                .icon-equipment::before {{
-                    width: 20px;
-                    height: 16px;
-                    border: 3px solid currentColor;
-                    border-radius: 4px;
-                }}
-                .icon-equipment::after {{
-                    right: 9px;
-                    top: 11px;
-                    width: 4px;
-                    height: 4px;
-                    border-radius: 50%;
-                    background: currentColor;
-                    box-shadow: 0 8px 0 currentColor;
+                    stroke: currentColor;
+                    stroke-width: 2;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                    fill: none;
                 }}
                 .notice {{
                     padding: 14px 16px;
                     border-radius: 8px;
-                    background: var(--panel);
+                    background: var(--accent-soft);
+                }}
+                .chart-insight {{
+                    margin: 10px 0 6px;
+                    padding: 14px 16px;
+                    border-left: 4px solid var(--accent);
+                    border-radius: 6px;
+                    background: #fff7f7;
+                }}
+                .chart-insight strong {{
+                    display: block;
+                    margin-bottom: 4px;
+                    color: var(--accent-dark);
+                    font-size: 14px;
+                }}
+                .chart-insight p {{
+                    margin: 0;
+                    color: var(--ink);
+                    font-size: 14px;
+                    line-height: 1.5;
                 }}
                 .error {{ color: #9d1c1c; }}
                 .table-wrap {{ overflow-x: auto; margin: 12px 0 30px; }}
@@ -1177,7 +1165,7 @@ def index():
                     text-align: left;
                     vertical-align: top;
                 }}
-                table.dataframe th {{ background: var(--panel); }}
+                table.dataframe th {{ background: var(--accent-soft); }}
                 .data-table table.dataframe thead th {{
                     position: sticky;
                     top: 0;
@@ -1203,7 +1191,7 @@ def index():
                 .excel-table thead .sticky-col {{
                     top: 0;
                     z-index: 4;
-                    background: var(--panel);
+                    background: var(--accent-soft);
                 }}
                 .excel-table .country-col {{
                     left: 0;
