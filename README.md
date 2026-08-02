@@ -22,6 +22,19 @@ Vercel can deploy this as a Python Flask app.
 
 No secrets are required. The app fetches public inflation data at runtime.
 
+Emailing PDF reports requires SMTP environment variables in Vercel:
+
+```text
+SMTP_HOST
+SMTP_PORT
+SMTP_USERNAME
+SMTP_PASSWORD
+SMTP_FROM
+SMTP_USE_TLS
+```
+
+`SMTP_USE_TLS` is optional and defaults to `true`.
+
 The repository root should contain `app.py`, `requirements.txt`, and `vercel.json`.
 
 ## Repository Location

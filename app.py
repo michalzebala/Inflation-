@@ -1,9 +1,13 @@
 import functools
+import base64
 import json
+import os
 import re
+import smtplib
 import warnings
 from datetime import datetime
 from email.utils import parsedate_to_datetime
+from email.message import EmailMessage
 from html import escape
 from urllib.parse import urlencode
 from urllib.request import urlopen
@@ -11,13 +15,36 @@ from urllib.request import urlopen
 import eurostat
 import pandas as pd
 import plotly.express as px
-from flask import Flask, request
+from flask import Flask, jsonify, request
 from markupsafe import Markup
 
 
 warnings.filterwarnings("ignore")
 
 app = Flask(__name__)
+
+
+def smtp_config():
+    return {
+        "host": os.getenv("SMTP_HOST"),
+        "port": int(os.getenv("SMTP_PORT", "587")),
+        "username": os.getenv("SMTP_USERNAME"),
+        "password": os.getenv("SMTP_PASSWORD"),
+        "sender": os.getenv("SMTP_FROM") or os.getenv("SMTP_USERNAME"),
+        "use_tls": os.getenv("SMTP_USE_TLS", "true").lower() != "false",
+    }
+
+
+def smtp_is_configured(config):
+    return all(
+        [
+            config["host"],
+            config["port"],
+            config["username"],
+            config["password"],
+            config["sender"],
+        ]
+    )
 
 
 COUNTRIES = {
@@ -519,10 +546,13 @@ def calculate_yoy_from_index(records):
 
 
 def flatten_singstat_rows(rows):
+    if isinstance(rows, dict):
+        rows = [rows]
+
     flattened = []
     for row in rows or []:
         flattened.append(row)
-        flattened.extend(flatten_singstat_rows(row.get("children")))
+        flattened.extend(flatten_singstat_rows(row.get("children") or row.get("row")))
     return flattened
 
 
@@ -533,7 +563,7 @@ def singstat_row_matches(row_text, patterns):
 
 @functools.lru_cache(maxsize=16)
 def fetch_singstat_table(cache_hour):
-    url = f"{SINGSTAT_API_BASE}/{SINGSTAT_CPI_RESOURCE_ID}"
+    url = f"{SINGSTAT_API_BASE}/{SINGSTAT_CPI_RESOURCE_ID}?limit=5000"
     with urlopen(url, timeout=30) as response:
         latest_data_upload = parse_upload_date(response.headers.get("Last-Modified"))
         payload = json.loads(response.read().decode("utf-8"))
@@ -542,7 +572,9 @@ def fetch_singstat_table(cache_hour):
     if not pd.isna(payload_upload):
         latest_data_upload = payload_upload
 
-    rows = payload.get("Data", {}).get("row") or payload.get("data", {}).get("row") or []
+    data_section = payload.get("Data", {}) or payload.get("data", {})
+    records_section = data_section.get("records", {})
+    rows = data_section.get("row") or records_section.get("row") or []
     return payload, latest_data_upload, rows
 
 
@@ -563,7 +595,11 @@ def fetch_singapore_official_series(spec, cache_hour):
         return pd.DataFrame(), latest_data_upload, "not available from SingStat CPI source", None
 
     records = []
-    for column in matched_row.get("columns", []) or matched_row.get("column", []):
+    columns = matched_row.get("columns", []) or matched_row.get("column", [])
+    if isinstance(columns, dict):
+        columns = [columns]
+
+    for column in columns:
         date_value = parse_month_text(column.get("key") or column.get("name"))
         if date_value is None:
             continue
@@ -584,14 +620,15 @@ def fetch_thailand_moc_series(spec):
 
     start_year = START_DATE.year - 1
     end_year = pd.Timestamp.today().year
-    params = urlencode(
-        {
-            "region_id": "5",
-            "index_id": "0000000000000000",
-            "from_year": start_year,
-            "to_year": end_year,
-        }
-    )
+    params_dict = {
+        "index_id": "0000000000000000",
+        "from_year": start_year,
+        "to_year": end_year,
+    }
+    if config["endpoint"] == "cpig-indexes":
+        params_dict["region_id"] = "5"
+
+    params = urlencode(params_dict)
     url = f"{THAILAND_MOC_API_BASE}/{config['endpoint']}?{params}"
 
     with urlopen(url, timeout=30) as response:
@@ -695,6 +732,9 @@ def get_imf_series(country_name, country_code, spec):
         long, latest_data_upload, status = fetch_imf_series(country_code, spec)
 
         if long.empty:
+            if spec.get("imf_indicator"):
+                return get_imf_series(country_name, country_code, spec)
+
             return pd.DataFrame(), build_status(
                 country_name,
                 spec,
@@ -1197,6 +1237,55 @@ def pivot_chart_data_html(chart_df):
     return "\n".join(rows)
 
 
+@app.route("/send-report-pdf", methods=["POST"])
+def send_report_pdf():
+    payload = request.get_json(silent=True) or {}
+    recipient = str(payload.get("email", "")).strip()
+    pdf_data = str(payload.get("pdf", ""))
+
+    if not recipient or "@" not in recipient:
+        return jsonify({"ok": False, "message": "Enter a valid recipient email."}), 400
+
+    if not pdf_data.startswith("data:application/pdf;base64,"):
+        return jsonify({"ok": False, "message": "PDF payload is missing."}), 400
+
+    config = smtp_config()
+    if not smtp_is_configured(config):
+        return jsonify(
+            {
+                "ok": False,
+                "message": (
+                    "Email sending is not configured. Set SMTP_HOST, SMTP_PORT, "
+                    "SMTP_USERNAME, SMTP_PASSWORD and SMTP_FROM in Vercel."
+                ),
+            }
+        ), 500
+
+    pdf_bytes = base64.b64decode(pdf_data.split(",", 1)[1])
+    message = EmailMessage()
+    message["Subject"] = "Global Claims CPI Dashboard report"
+    message["From"] = config["sender"]
+    message["To"] = recipient
+    message.set_content("Please find the Global Claims CPI Dashboard report attached.")
+    message.add_attachment(
+        pdf_bytes,
+        maintype="application",
+        subtype="pdf",
+        filename="global-claims-cpi-dashboard.pdf",
+    )
+
+    try:
+        with smtplib.SMTP(config["host"], config["port"], timeout=30) as server:
+            if config["use_tls"]:
+                server.starttls()
+            server.login(config["username"], config["password"])
+            server.send_message(message)
+    except Exception as exc:
+        return jsonify({"ok": False, "message": f"Email failed: {exc}"}), 500
+
+    return jsonify({"ok": True, "message": "PDF sent."})
+
+
 @app.route("/")
 def index():
     selected = selected_countries_from_request()
@@ -1344,6 +1433,7 @@ def index():
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <title>Motor Inflation Dashboard</title>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js" integrity="sha512-YcsIPGdhPK4P/uRW6/sruonBLp93bYnxCq5E4fW3r6o0vWg8kh/Cl3nM4QL5BrM6aLlH2zJRghT+nagwOe0Hnw==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
             <style>
                 :root {{
                     color-scheme: light;
@@ -1465,6 +1555,42 @@ def index():
                 button:hover {{
                     background: var(--accent-dark);
                     border-color: var(--accent-dark);
+                }}
+                .export-tools {{
+                    margin-top: 22px;
+                    padding-top: 18px;
+                    border-top: 1px solid #f0b8bb;
+                }}
+                .export-tools h2 {{
+                    margin: 0 0 12px;
+                    font-size: 16px;
+                    letter-spacing: 0;
+                }}
+                .export-tools label {{
+                    display: block;
+                    margin-top: 12px;
+                }}
+                .export-tools label span {{
+                    display: block;
+                    margin-bottom: 6px;
+                    font-size: 13px;
+                    font-weight: 700;
+                    color: var(--muted);
+                }}
+                .export-tools input[type="email"] {{
+                    width: 100%;
+                    min-height: 40px;
+                    padding: 0 10px;
+                    font: inherit;
+                    border-radius: 6px;
+                    border: 1px solid var(--line);
+                }}
+                #export-status {{
+                    min-height: 18px;
+                    margin: 10px 0 0;
+                    color: var(--muted);
+                    font-size: 13px;
+                    line-height: 1.4;
                 }}
                 button[aria-busy="true"] {{
                     opacity: 0.78;
@@ -1697,6 +1823,16 @@ def index():
                             <span>Fetching inflation data...</span>
                         </div>
                     </form>
+                    <div class="export-tools">
+                        <h2>Export report</h2>
+                        <button type="button" id="download-pdf-button">Download PDF</button>
+                        <label>
+                            <span>Email address</span>
+                            <input type="email" id="report-email" placeholder="name@example.com">
+                        </label>
+                        <button type="button" id="send-pdf-button">Send PDF by email</button>
+                        <p id="export-status" role="status" aria-live="polite"></p>
+                    </div>
                 </aside>
                 <div>
                     {metrics_html}
@@ -1712,11 +1848,73 @@ def index():
                 const loader = document.getElementById("loader");
                 const button = document.getElementById("load-button");
                 const rangeChanged = document.getElementById("range-changed");
+                const downloadPdfButton = document.getElementById("download-pdf-button");
+                const sendPdfButton = document.getElementById("send-pdf-button");
+                const reportEmail = document.getElementById("report-email");
+                const exportStatus = document.getElementById("export-status");
+
+                const pdfOptions = {{
+                    margin: 8,
+                    filename: "global-claims-cpi-dashboard.pdf",
+                    image: {{ type: "jpeg", quality: 0.98 }},
+                    html2canvas: {{ scale: 2, useCORS: true, logging: false }},
+                    jsPDF: {{ unit: "mm", format: "a4", orientation: "landscape" }},
+                    pagebreak: {{ mode: ["avoid-all", "css", "legacy"] }}
+                }};
+
+                function setExportStatus(message) {{
+                    exportStatus.textContent = message;
+                }}
+
+                function reportElement() {{
+                    return document.body;
+                }}
+
+                async function buildPdfDataUri() {{
+                    return await html2pdf()
+                        .set(pdfOptions)
+                        .from(reportElement())
+                        .outputPdf("datauristring");
+                }}
 
                 form.addEventListener("submit", () => {{
                     loader.classList.add("is-active");
                     button.setAttribute("aria-busy", "true");
                     button.textContent = "Fetching...";
+                }});
+
+                downloadPdfButton.addEventListener("click", async () => {{
+                    setExportStatus("Preparing PDF...");
+                    downloadPdfButton.setAttribute("aria-busy", "true");
+                    await html2pdf().set(pdfOptions).from(reportElement()).save();
+                    downloadPdfButton.removeAttribute("aria-busy");
+                    setExportStatus("PDF downloaded.");
+                }});
+
+                sendPdfButton.addEventListener("click", async () => {{
+                    const email = reportEmail.value.trim();
+                    if (!email) {{
+                        setExportStatus("Enter an email address first.");
+                        return;
+                    }}
+
+                    setExportStatus("Preparing and sending PDF...");
+                    sendPdfButton.setAttribute("aria-busy", "true");
+
+                    try {{
+                        const pdf = await buildPdfDataUri();
+                        const response = await fetch("/send-report-pdf", {{
+                            method: "POST",
+                            headers: {{ "Content-Type": "application/json" }},
+                            body: JSON.stringify({{ email, pdf }})
+                        }});
+                        const result = await response.json();
+                        setExportStatus(result.message || (response.ok ? "PDF sent." : "Sending failed."));
+                    }} catch (error) {{
+                        setExportStatus(`Sending failed: ${{error.message}}`);
+                    }} finally {{
+                        sendPdfButton.removeAttribute("aria-busy");
+                    }}
                 }});
 
                 document.querySelectorAll('input[type="month"]').forEach((input) => {{
