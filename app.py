@@ -1507,8 +1507,25 @@ def requested_month_range(raw):
     default_start = max(available_min, START_DATE)
 
     use_custom_range = request.args.get("range_changed") == "1"
-    requested_start = parse_month(request.args.get("start_month")) if use_custom_range else None
-    requested_end = parse_month(request.args.get("end_month")) if use_custom_range else None
+    start_from_parts = None
+    end_from_parts = None
+
+    if use_custom_range:
+        start_year = request.args.get("start_year_part")
+        start_month_part = request.args.get("start_month_part")
+        end_year = request.args.get("end_year_part")
+        end_month_part = request.args.get("end_month_part")
+        if start_year and start_month_part:
+            start_from_parts = parse_month(f"{start_year}-{start_month_part}")
+        if end_year and end_month_part:
+            end_from_parts = parse_month(f"{end_year}-{end_month_part}")
+
+    requested_start = start_from_parts or (
+        parse_month(request.args.get("start_month")) if use_custom_range else None
+    )
+    requested_end = end_from_parts or (
+        parse_month(request.args.get("end_month")) if use_custom_range else None
+    )
     start_month = requested_start if requested_start is not None else default_start
     end_month = requested_end if requested_end is not None else default_end
 
@@ -1554,16 +1571,62 @@ def render_options(
     min_attr = f' min="{escape(format_month(min_month))}"' if min_month is not None else ""
     max_attr = f' max="{escape(format_month(max_month))}"' if max_month is not None else ""
 
+    min_year = pd.Timestamp(min_month or start_month).year
+    max_year = pd.Timestamp(max_month or end_month).year
+    start_month_value = pd.Timestamp(start_month).month
+    end_month_value = pd.Timestamp(end_month).month
+    start_year_value = pd.Timestamp(start_month).year
+    end_year_value = pd.Timestamp(end_month).year
+
+    month_options = "".join(
+        f'<option value="{month:02d}">{month:02d}</option>'
+        for month in range(1, 13)
+    )
+    start_month_options = month_options.replace(
+        f'value="{start_month_value:02d}"',
+        f'value="{start_month_value:02d}" selected',
+        1,
+    )
+    end_month_options = month_options.replace(
+        f'value="{end_month_value:02d}"',
+        f'value="{end_month_value:02d}" selected',
+        1,
+    )
+    start_year_options = "".join(
+        (
+            f'<option value="{year}" selected>{year}</option>'
+            if year == start_year_value
+            else f'<option value="{year}">{year}</option>'
+        )
+        for year in range(min_year, max_year + 1)
+    )
+    end_year_options = "".join(
+        (
+            f'<option value="{year}" selected>{year}</option>'
+            if year == end_year_value
+            else f'<option value="{year}">{year}</option>'
+        )
+        for year in range(min_year, max_year + 1)
+    )
+
     range_html = f"""
     <div class="date-range">
         <label>
-            <span>Start month</span>
-            <input type="month" name="start_month" value="{escape(format_month(start_month))}"{min_attr}{max_attr}>
+            <span>Start</span>
+            <div class="date-pair">
+                <select name="start_month_part">{start_month_options}</select>
+                <select name="start_year_part">{start_year_options}</select>
+            </div>
         </label>
         <label>
-            <span>End month</span>
-            <input type="month" name="end_month" value="{escape(format_month(end_month))}"{min_attr}{max_attr}>
+            <span>End</span>
+            <div class="date-pair">
+                <select name="end_month_part">{end_month_options}</select>
+                <select name="end_year_part">{end_year_options}</select>
+            </div>
         </label>
+        <input type="hidden" name="start_month" value="{escape(format_month(start_month))}">
+        <input type="hidden" name="end_month" value="{escape(format_month(end_month))}">
         <input type="hidden" id="range-changed" name="range_changed" value="{"1" if use_custom_range else "0"}">
     </div>
     """
@@ -1952,15 +2015,6 @@ def index():
                     border: 1px solid var(--line);
                     background: white;
                 }}
-                input[type="month"] {{
-                    width: 100%;
-                    min-height: 40px;
-                    padding: 0 10px;
-                    font: inherit;
-                    border-radius: 6px;
-                    border: 1px solid var(--line);
-                    background: white;
-                }}
                 .date-range {{
                     display: grid;
                     gap: 10px;
@@ -1972,6 +2026,11 @@ def index():
                     font-size: 13px;
                     font-weight: 700;
                     color: var(--muted);
+                }}
+                .date-pair {{
+                    display: grid;
+                    grid-template-columns: 0.8fr 1.2fr;
+                    gap: 8px;
                 }}
                 button {{
                     margin-top: 18px;
@@ -2376,7 +2435,7 @@ def index():
                     }}
                 }});
 
-                document.querySelectorAll('input[type="month"]').forEach((input) => {{
+                document.querySelectorAll(".date-pair select").forEach((input) => {{
                     input.addEventListener("change", () => {{
                         rangeChanged.value = "1";
                     }});
