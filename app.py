@@ -202,7 +202,7 @@ SERIES = [
 ]
 
 DEFAULT_YEARS = 10
-START_DATE = pd.Timestamp.today().normalize() - pd.DateOffset(years=DEFAULT_YEARS)
+START_DATE = pd.Timestamp("2019-01-01")
 EUROSTAT_API_BASE = (
     "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/"
 )
@@ -334,6 +334,52 @@ def parse_calendar_date(value):
         return pd.NaT
 
     return pd.Timestamp(parsed).normalize()
+
+
+def normalize_thai_year(value):
+    if value is None or value == "":
+        return None
+
+    year = int(float(value))
+    if year > 2400:
+        year -= 543
+    return year
+
+
+def normalize_month_number(value):
+    if value is None or value == "":
+        return None
+
+    month_names = {
+        "jan": 1,
+        "january": 1,
+        "feb": 2,
+        "february": 2,
+        "mar": 3,
+        "march": 3,
+        "apr": 4,
+        "april": 4,
+        "may": 5,
+        "jun": 6,
+        "june": 6,
+        "jul": 7,
+        "july": 7,
+        "aug": 8,
+        "august": 8,
+        "sep": 9,
+        "september": 9,
+        "oct": 10,
+        "october": 10,
+        "nov": 11,
+        "november": 11,
+        "dec": 12,
+        "december": 12,
+    }
+    normalized = str(value).strip().lower()
+    if normalized in month_names:
+        return month_names[normalized]
+
+    return int(float(normalized))
 
 
 def jsonstat_time_series(payload):
@@ -552,11 +598,26 @@ def fetch_thailand_moc_series(spec):
         latest_data_upload = parse_upload_date(response.headers.get("Last-Modified"))
         payload = json.loads(response.read().decode("utf-8"))
 
-    rows = payload if isinstance(payload, list) else payload.get("data", [])
+    if isinstance(payload, list):
+        rows = payload
+    else:
+        rows = (
+            payload.get("data")
+            or payload.get("Data")
+            or payload.get("result")
+            or payload.get("results")
+            or []
+        )
+
     records = []
     yoy_records = []
     for row in rows:
-        year = row.get("year") or row.get("base_year")
+        year = (
+            row.get("year")
+            or row.get("price_year")
+            or row.get("index_year")
+            or row.get("period_year")
+        )
         month = row.get("month") or row.get("month_no") or row.get("period")
         index_value = (
             row.get("index")
@@ -566,7 +627,11 @@ def fetch_thailand_moc_series(spec):
         )
         if not year or not month:
             continue
-        date_value = parse_month(f"{int(year):04d}-{int(month):02d}")
+        year_value = normalize_thai_year(year)
+        month_value = normalize_month_number(month)
+        if year_value is None or month_value is None:
+            continue
+        date_value = parse_month(f"{year_value:04d}-{month_value:02d}")
         if row.get("yoy") is not None:
             yoy_records.append({"date": date_value, "value": row.get("yoy")})
         records.append({"date": date_value, "index_value": index_value})
@@ -979,7 +1044,7 @@ def requested_month_range(raw):
     available_max = raw["month"].max()
 
     default_end = available_max
-    default_start = max(available_min, default_end - pd.DateOffset(years=DEFAULT_YEARS))
+    default_start = max(available_min, START_DATE)
 
     use_custom_range = request.args.get("range_changed") == "1"
     requested_start = parse_month(request.args.get("start_month")) if use_custom_range else None
@@ -998,7 +1063,7 @@ def requested_month_range(raw):
 
 def default_month_range():
     end_month = pd.Timestamp.today().normalize().to_period("M").to_timestamp()
-    start_month = end_month - pd.DateOffset(years=DEFAULT_YEARS)
+    start_month = START_DATE
     return start_month, end_month
 
 
@@ -1148,7 +1213,7 @@ def index():
 
     if not should_load:
         charts_html = (
-            '<p class="notice">Select countries and click the button to fetch Eurostat data.</p>'
+            '<p class="notice">Select countries and click the button to fetch inflation data.</p>'
         )
         data_table_html = ""
         latest_html = ""
@@ -1629,7 +1694,7 @@ def index():
                         <button type="submit" id="load-button">Fetch data and show charts</button>
                         <div class="loader" id="loader" role="status" aria-live="polite">
                             <span class="spinner" aria-hidden="true"></span>
-                            <span>Fetching Eurostat data...</span>
+                            <span>Fetching inflation data...</span>
                         </div>
                     </form>
                 </aside>
