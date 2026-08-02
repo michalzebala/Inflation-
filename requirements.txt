@@ -1,4 +1,5 @@
 Flask>=3.0
 eurostat>=1.1.1
 pandas>=2.0
+numpy>=1.24
 plotly>=5.20

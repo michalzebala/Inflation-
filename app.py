@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 from urllib.request import urlopen
 
 import eurostat
+import numpy as np
 import pandas as pd
 import plotly.express as px
 from flask import Flask, jsonify, request
@@ -62,6 +63,11 @@ COUNTRIES = {
 
 EUROSTAT_COUNTRIES = {"Poland", "Germany", "Austria", "Greece", "Estonia", "Lithuania", "Latvia"}
 IMF_COUNTRIES = {"Thailand", "Singapore", "India"}
+WORLD_BANK_COUNTRIES = {
+    "TH": "THA",
+    "SG": "SGP",
+    "IN": "IND",
+}
 
 SINGSTAT_ROW_PATTERNS = {
     "headline": ["all items"],
@@ -234,6 +240,8 @@ EUROSTAT_API_BASE = (
     "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/"
 )
 IMF_API_BASE = "https://dataservices.imf.org/REST/SDMX_JSON.svc/CompactData/CPI"
+IMF_SDMX_BASE = "dataservices.imf.org/REST/SDMX_JSON.svc/CompactData"
+WORLD_BANK_API_BASE = "https://api.worldbank.org/v2/country"
 SINGSTAT_API_BASE = "https://tablebuilder.singstat.gov.sg/api/table/tabledata"
 THAILAND_MOC_API_BASE = "https://dataapi.moc.go.th"
 PRIMARY_EUROSTAT_DATASET = "prc_hicp_minr"
@@ -498,39 +506,83 @@ def fetch_imf_series(country_code, spec):
 
     start_period = (START_DATE - pd.DateOffset(months=13)).strftime("%Y-%m")
     end_period = pd.Timestamp.today().normalize().strftime("%Y-%m")
+    candidates = [
+        f"https://{IMF_SDMX_BASE}/CPI/M.{country_code}.{indicator}",
+        f"http://{IMF_SDMX_BASE}/CPI/M.{country_code}.{indicator}",
+        f"https://{IMF_SDMX_BASE}/IFS/M.{country_code}.{indicator}",
+        f"http://{IMF_SDMX_BASE}/IFS/M.{country_code}.{indicator}",
+    ]
+    latest_error = "empty IMF response"
+
+    for base_url in candidates:
+        url = f"{base_url}?startPeriod={start_period}&endPeriod={end_period}"
+        try:
+            with urlopen(url, timeout=30) as response:
+                latest_data_upload = parse_upload_date(response.headers.get("Last-Modified"))
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            latest_error = f"IMF request failed: {exc}"
+            continue
+
+        series = payload.get("CompactData", {}).get("DataSet", {}).get("Series")
+        records = []
+
+        for item in normalize_imf_series(series):
+            observations = item.get("Obs", [])
+            observations = observations if isinstance(observations, list) else [observations]
+            for obs in observations:
+                records.append(
+                    {
+                        "date": parse_period(obs.get("@TIME_PERIOD")),
+                        "index_value": obs.get("@OBS_VALUE"),
+                    }
+                )
+
+        data = calculate_yoy_from_index(records)
+        if not data.empty:
+            return data, latest_data_upload, "ok"
+
+    return pd.DataFrame(), pd.NaT, latest_error
+
+
+def fetch_world_bank_headline_series(country_code, spec):
+    if spec["factor"] != "headline":
+        return pd.DataFrame(), pd.NaT, "not available from World Bank fallback"
+
+    wb_country = WORLD_BANK_COUNTRIES.get(country_code)
+    if not wb_country:
+        return pd.DataFrame(), pd.NaT, "not available from World Bank fallback"
+
+    start_year = START_DATE.year
+    end_year = pd.Timestamp.today().year
     url = (
-        f"{IMF_API_BASE}/M.{country_code}.{indicator}"
-        f"?startPeriod={start_period}&endPeriod={end_period}"
+        f"{WORLD_BANK_API_BASE}/{wb_country}/indicator/FP.CPI.TOTL.ZG"
+        f"?format=json&date={start_year}:{end_year}&per_page=200"
     )
 
     with urlopen(url, timeout=30) as response:
         latest_data_upload = parse_upload_date(response.headers.get("Last-Modified"))
         payload = json.loads(response.read().decode("utf-8"))
 
-    series = payload.get("CompactData", {}).get("DataSet", {}).get("Series")
+    observations = payload[1] if isinstance(payload, list) and len(payload) > 1 else []
     records = []
-
-    for item in normalize_imf_series(series):
-        observations = item.get("Obs", [])
-        observations = observations if isinstance(observations, list) else [observations]
-        for obs in observations:
-            records.append(
-                {
-                    "date": parse_period(obs.get("@TIME_PERIOD")),
-                    "index_value": obs.get("@OBS_VALUE"),
-                }
-            )
+    for obs in observations:
+        if obs.get("value") is None:
+            continue
+        records.append(
+            {
+                "date": pd.Timestamp(f"{obs['date']}-01-01"),
+                "value": obs["value"],
+            }
+        )
 
     if not records:
-        return pd.DataFrame(), latest_data_upload, "empty IMF response"
+        return pd.DataFrame(), latest_data_upload, "empty World Bank response"
 
-    index_df = pd.DataFrame(records)
-    index_df["index_value"] = pd.to_numeric(index_df["index_value"], errors="coerce")
-    index_df = index_df.dropna(subset=["date", "index_value"]).sort_values("date")
-    index_df["value"] = index_df["index_value"].pct_change(periods=12) * 100
-    index_df = index_df[index_df["date"] >= START_DATE].dropna(subset=["value"])
-
-    return index_df[["date", "value"]], latest_data_upload, "ok"
+    data = pd.DataFrame(records)
+    data["value"] = pd.to_numeric(data["value"], errors="coerce")
+    data = data[data["date"] >= START_DATE].dropna(subset=["date", "value"])
+    return data[["date", "value"]].sort_values("date"), latest_data_upload, "ok"
 
 
 def calculate_yoy_from_index(records):
@@ -814,6 +866,51 @@ def get_local_official_series(country_name, country_code, spec, cache_hour):
         return get_imf_series(country_name, country_code, spec)
 
 
+def get_imf_series(country_name, country_code, spec):
+    try:
+        source_name = "IMF CPI/IFS CompactData"
+        long, latest_data_upload, status = fetch_imf_series(country_code, spec)
+
+        if long.empty and spec["factor"] == "headline":
+            source_name = "World Bank FP.CPI.TOTL.ZG"
+            long, latest_data_upload, status = fetch_world_bank_headline_series(
+                country_code,
+                spec,
+            )
+
+        if long.empty:
+            return pd.DataFrame(), build_status(
+                country_name,
+                spec,
+                status,
+                latest_data_upload=latest_data_upload,
+            )
+
+        indicator = spec["imf_indicator_label"] or spec["indicator"]
+        long["country"] = country_name
+        long["geo"] = country_code
+        long["factor"] = spec["factor"]
+        long["factor_label"] = spec["factor_label"]
+        long["indicator"] = indicator
+        long["coicop"] = spec["coicop"]
+        long["coicop18"] = spec["coicop18"]
+        long["latest_data_upload"] = latest_data_upload
+        long["source"] = source_name
+
+        return long, build_status(
+            country_name,
+            {**spec, "indicator": indicator},
+            "ok",
+            len(long),
+            long["date"].min(),
+            long["date"].max(),
+            latest_data_upload,
+        )
+
+    except Exception as exc:
+        return pd.DataFrame(), build_status(country_name, spec, f"error: {exc}")
+
+
 @functools.lru_cache(maxsize=32)
 def load_data(selected_countries, cache_day):
     frames = []
@@ -1039,7 +1136,147 @@ def make_plot(chart_df, factor):
     return fig.to_html(full_html=False, include_plotlyjs="cdn")
 
 
-def chart_insight_html():
+def describe_direction(delta):
+    if pd.isna(delta):
+        return "no comparable prior data"
+    if delta > 0:
+        return f"up by {delta:.2f} pp"
+    if delta < 0:
+        return f"down by {abs(delta):.2f} pp"
+    return "unchanged"
+
+
+def claims_lens_for_factor(factor):
+    if factor in {"parts", "labor", "fuel_energy"}:
+        return "motor claims severity"
+    if factor in {
+        "property_repair",
+        "property_materials",
+        "property_services",
+        "household_equipment",
+    }:
+        return "property claims severity"
+    if factor == "medical":
+        return "bodily injury and assistance costs"
+    return "overall claims inflation context"
+
+
+def trend_label(latest_value, previous_value, three_month_average):
+    monthly_delta = latest_value - previous_value if not pd.isna(previous_value) else np.nan
+    three_month_gap = (
+        latest_value - three_month_average
+        if not pd.isna(three_month_average)
+        else np.nan
+    )
+
+    if not pd.isna(three_month_gap) and three_month_gap >= 1.5:
+        return "clear upward breakout"
+    if not pd.isna(three_month_gap) and three_month_gap <= -1.5:
+        return "meaningful downward break"
+    if not pd.isna(monthly_delta) and monthly_delta >= 0.7:
+        return "near-term acceleration"
+    if not pd.isna(monthly_delta) and monthly_delta <= -0.7:
+        return "near-term easing"
+    if latest_value >= 5:
+        return "persistently elevated inflation"
+    if latest_value < 0:
+        return "deflationary pressure"
+    return "stable recent trend"
+
+
+def claims_implication(factor, latest_value, label):
+    if "upward" in label or "acceleration" in label or latest_value >= 5:
+        if factor in {"parts", "labor"}:
+            return "This points to renewed pressure on motor repair invoices and reserve assumptions."
+        if factor == "fuel_energy":
+            return "This can feed into towing, mobility, supplier logistics and some repair overheads."
+        if factor in {"property_repair", "property_materials", "property_services"}:
+            return "This suggests pressure on property repair estimates, contractor rates and claim settlement costs."
+        if factor == "household_equipment":
+            return "This may lift replacement costs for household contents and selected property claim items."
+        if factor == "medical":
+            return "This can affect bodily injury, medical assistance and related service costs."
+        return "This raises the general claims inflation backdrop."
+
+    if "downward" in label or "easing" in label or latest_value < 0:
+        if factor in {"parts", "labor"}:
+            return "This reduces near-term pressure on motor repair severity, though supplier pricing should still be monitored."
+        if factor in {"property_repair", "property_materials", "property_services"}:
+            return "This may ease pressure on property repair budgets if the trend persists."
+        if factor == "fuel_energy":
+            return "This may reduce pressure on logistics-sensitive claim costs."
+        return "This suggests a softer claims inflation environment."
+
+    return "This looks broadly stable, so recent assumptions may not need immediate adjustment."
+
+
+def generated_chart_insight_html(chart_df, factor):
+    sub = chart_df[chart_df["factor"] == factor].copy()
+    if sub.empty:
+        return """
+        <div class="chart-insight">
+            <strong>Insight</strong>
+            <p>No data is available for this chart in the selected range.</p>
+        </div>
+        """
+
+    insights = []
+    lens = claims_lens_for_factor(factor)
+    for country, country_df in sub.groupby("country"):
+        country_df = country_df.sort_values("date")
+        latest = country_df.iloc[-1]
+        latest_date = latest["date"]
+        latest_value = latest["value"]
+
+        previous_rows = country_df[country_df["date"] < latest_date]
+        previous_value = previous_rows.iloc[-1]["value"] if not previous_rows.empty else np.nan
+
+        three_month_rows = previous_rows.tail(3)
+        three_month_average = (
+            three_month_rows["value"].mean()
+            if len(three_month_rows) > 0
+            else np.nan
+        )
+
+        trailing_start = latest_date - pd.DateOffset(months=12)
+        trailing_rows = country_df[
+            (country_df["date"] >= trailing_start)
+            & (country_df["date"] < latest_date)
+        ]
+        twelve_month_value = trailing_rows.iloc[0]["value"] if not trailing_rows.empty else np.nan
+
+        monthly_delta = latest_value - previous_value if not pd.isna(previous_value) else np.nan
+        trailing_delta = (
+            latest_value - twelve_month_value
+            if not pd.isna(twelve_month_value)
+            else np.nan
+        )
+        label = trend_label(latest_value, previous_value, three_month_average)
+        implication = claims_implication(factor, latest_value, label)
+
+        insights.append(
+            "<li>"
+            f"<strong>{escape(str(country))}</strong>: "
+            f"{label} for {lens}. "
+            f"The latest reading is {latest_value:.2f}% in {latest_date.strftime('%B %Y')}, "
+            f"{describe_direction(monthly_delta)} vs the previous month and "
+            f"{describe_direction(trailing_delta)} over the last available 12-month window. "
+            f"{implication}"
+            "</li>"
+        )
+
+    return f"""
+    <div class="chart-insight">
+        <strong>Insight</strong>
+        <ul>{"".join(insights)}</ul>
+    </div>
+    """
+
+
+def chart_insight_html(chart_df, factor, generate_insights):
+    if generate_insights:
+        return generated_chart_insight_html(chart_df, factor)
+
     return """
     <div class="chart-insight">
         <strong>Insight</strong>
@@ -1293,6 +1530,7 @@ def index():
         selected = tuple(COUNTRIES.keys())
 
     should_load = request.args.get("load") == "1"
+    generate_insights = should_load and request.args.get("generate_insights") == "1"
     default_start_month, default_end_month = default_month_range()
     checkbox_html, range_html = render_options(
         selected,
@@ -1378,7 +1616,7 @@ def index():
                         '<section class="chart-section">'
                         f"{chart_header_html(factor, chart_df, unavailable_notes)}"
                         f"{make_plot(chart_df, factor)}"
-                        f"{chart_insight_html()}"
+                        f"{chart_insight_html(chart_df, factor, generate_insights)}"
                         "</section>"
                     )
                     for factor in FACTORS
@@ -1444,6 +1682,9 @@ def index():
                     --accent: #d71920;
                     --accent-dark: #a80f17;
                     --accent-soft: #ffe3e4;
+                    --selector-blue: #1769aa;
+                    --selector-blue-soft: #e8f2fb;
+                    --selector-blue-line: #9fc8ea;
                 }}
                 * {{ box-sizing: border-box; }}
                 html {{
@@ -1512,8 +1753,16 @@ def index():
                     display: flex;
                     align-items: center;
                     gap: 8px;
-                    margin: 8px 0;
-                    color: #26313d;
+                    margin: 7px 0;
+                    padding: 7px 9px;
+                    color: #14395f;
+                    background: var(--selector-blue-soft);
+                    border: 1px solid var(--selector-blue-line);
+                    border-radius: 6px;
+                    font-weight: 600;
+                }}
+                .check input {{
+                    accent-color: var(--selector-blue);
                 }}
                 select, button {{
                     width: 100%;
@@ -1555,6 +1804,10 @@ def index():
                 button:hover {{
                     background: var(--accent-dark);
                     border-color: var(--accent-dark);
+                }}
+                button:disabled {{
+                    opacity: 0.48;
+                    cursor: not-allowed;
                 }}
                 .export-tools {{
                     margin-top: 22px;
@@ -1723,6 +1976,16 @@ def index():
                     font-size: 14px;
                     line-height: 1.5;
                 }}
+                .chart-insight ul {{
+                    margin: 0;
+                    padding-left: 18px;
+                    color: var(--ink);
+                    font-size: 14px;
+                    line-height: 1.5;
+                }}
+                .chart-insight li + li {{
+                    margin-top: 4px;
+                }}
                 .error {{ color: #9d1c1c; }}
                 .table-wrap {{ overflow-x: auto; margin: 12px 0 30px; }}
                 .data-table {{
@@ -1818,6 +2081,15 @@ def index():
                         {range_html}
                         <input type="hidden" name="load" value="1">
                         <button type="submit" id="load-button">Fetch data and show charts</button>
+                        <button
+                            type="submit"
+                            id="generate-insights-button"
+                            name="generate_insights"
+                            value="1"
+                            {"disabled" if not should_load else ""}
+                        >
+                            Generate insights
+                        </button>
                         <div class="loader" id="loader" role="status" aria-live="polite">
                             <span class="spinner" aria-hidden="true"></span>
                             <span>Fetching inflation data...</span>
@@ -1847,6 +2119,7 @@ def index():
                 const form = document.getElementById("data-form");
                 const loader = document.getElementById("loader");
                 const button = document.getElementById("load-button");
+                const insightsButton = document.getElementById("generate-insights-button");
                 const rangeChanged = document.getElementById("range-changed");
                 const downloadPdfButton = document.getElementById("download-pdf-button");
                 const sendPdfButton = document.getElementById("send-pdf-button");
@@ -1877,10 +2150,16 @@ def index():
                         .outputPdf("datauristring");
                 }}
 
-                form.addEventListener("submit", () => {{
+                form.addEventListener("submit", (event) => {{
                     loader.classList.add("is-active");
-                    button.setAttribute("aria-busy", "true");
-                    button.textContent = "Fetching...";
+                    const submitter = event.submitter;
+                    if (submitter === insightsButton) {{
+                        insightsButton.setAttribute("aria-busy", "true");
+                        insightsButton.textContent = "Generating...";
+                    }} else {{
+                        button.setAttribute("aria-busy", "true");
+                        button.textContent = "Fetching...";
+                    }}
                 }});
 
                 downloadPdfButton.addEventListener("click", async () => {{
