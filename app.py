@@ -339,17 +339,31 @@ def aggregate_for_charts(raw):
     )
 
 
+def indicator_names_for_factor(factor):
+    indicators = [
+        spec["indicator"]
+        for spec in SERIES
+        if spec["factor"] == factor
+    ]
+    return ", ".join(indicators)
+
+
 def make_plot(chart_df, factor):
     sub = chart_df[chart_df["factor"] == factor].copy()
     if sub.empty:
         return f'<p class="notice">{escape(FACTORS[factor])}: no data available.</p>'
+
+    title = (
+        f"{FACTORS[factor]}"
+        f"<br><sup>Indicator name: {indicator_names_for_factor(factor)}</sup>"
+    )
 
     fig = px.line(
         sub,
         x="date",
         y="value",
         color="country",
-        title=FACTORS[factor],
+        title=title,
         labels={
             "date": "Date",
             "value": "Year-over-year inflation, %",
