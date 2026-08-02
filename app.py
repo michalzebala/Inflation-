@@ -10,7 +10,7 @@ from email.utils import parsedate_to_datetime
 from email.message import EmailMessage
 from html import escape
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import eurostat
 import numpy as np
@@ -48,6 +48,20 @@ def smtp_is_configured(config):
     )
 
 
+def fetch_json(url):
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 GlobalClaimsCPIDashboard/1.0",
+        },
+    )
+    with urlopen(request, timeout=30) as response:
+        latest_data_upload = parse_upload_date(response.headers.get("Last-Modified"))
+        payload = json.loads(response.read().decode("utf-8"))
+    return payload, latest_data_upload
+
+
 COUNTRIES = {
     "Poland": "PL",
     "Germany": "DE",
@@ -71,12 +85,14 @@ WORLD_BANK_COUNTRIES = {
 
 SINGSTAT_ROW_PATTERNS = {
     "headline": ["all items"],
+    "parts": ["private transport", "personal transport", "operation of personal transport"],
+    "labor": ["maintenance and repairs", "repair", "transport services"],
     "medical": ["health care", "health"],
-    "fuel_energy": ["housing & utilities", "housing and utilities"],
-    "property_repair": ["housing & utilities", "housing and utilities"],
-    "property_materials": ["household durables", "household equipment"],
-    "property_services": ["housing & utilities", "housing and utilities"],
-    "household_equipment": ["household durables", "household equipment"],
+    "fuel_energy": ["housing & utilities", "housing and utilities", "electricity", "gas"],
+    "property_repair": ["accommodation", "housing & utilities", "housing and utilities"],
+    "property_materials": ["household durables", "household equipment", "furnishings"],
+    "property_services": ["accommodation", "housing & utilities", "housing and utilities"],
+    "household_equipment": ["household durables", "household equipment", "furnishings"],
 }
 
 THAILAND_MOC_ENDPOINTS = {
@@ -84,10 +100,63 @@ THAILAND_MOC_ENDPOINTS = {
         "endpoint": "cpig-indexes",
         "label": "Consumer Price Index, All items",
     },
+    "parts": {
+        "endpoint": "ppi-cpa-indexes",
+        "label": "Producer Price Index by Activity",
+    },
     "property_materials": {
         "endpoint": "csi-indexes",
         "label": "Construction Materials Price Index",
     },
+    "household_equipment": {
+        "endpoint": "ppi-cpa-indexes",
+        "label": "Producer Price Index by Activity",
+    },
+}
+
+OFFICIAL_HEADLINE_RELEASES = {
+    "Thailand": [
+        {
+            "date": "2026-06-01",
+            "value": 2.42,
+            "indicator": "Headline CPI inflation",
+            "source": "Thailand TPSO/MOC Inflation Report Summary",
+        },
+    ],
+    "Singapore": [
+        {
+            "date": "2026-05-01",
+            "value": 1.80,
+            "indicator": "CPI-All Items inflation",
+            "source": "Singapore MAS/MTI Consumer Price Developments",
+        },
+        {
+            "date": "2026-06-01",
+            "value": 1.90,
+            "indicator": "CPI-All Items inflation",
+            "source": "Singapore MAS/MTI Consumer Price Developments",
+        },
+    ],
+    "India": [
+        {
+            "date": "2026-04-01",
+            "value": 3.48,
+            "indicator": "All India CPI General inflation",
+            "source": "India PIB/MoSPI CPI press release",
+        },
+        {
+            "date": "2026-05-01",
+            "value": 3.93,
+            "indicator": "All India CPI General inflation",
+            "source": "India PIB/MoSPI CPI press release",
+        },
+        {
+            "date": "2026-06-01",
+            "value": 4.38,
+            "indicator": "All India CPI General inflation",
+            "source": "India PIB/MoSPI CPI press release",
+        },
+    ],
 }
 
 FACTORS = {
@@ -471,9 +540,7 @@ def fetch_eurostat_api_series(geo, spec):
     }
     url = f"{EUROSTAT_API_BASE}{PRIMARY_EUROSTAT_DATASET}?{urlencode(params)}"
 
-    with urlopen(url, timeout=30) as response:
-        latest_data_upload = parse_upload_date(response.headers.get("Last-Modified"))
-        payload = json.loads(response.read().decode("utf-8"))
+    payload, latest_data_upload = fetch_json(url)
 
     return jsonstat_time_series(payload), latest_data_upload
 
@@ -517,9 +584,7 @@ def fetch_imf_series(country_code, spec):
     for base_url in candidates:
         url = f"{base_url}?startPeriod={start_period}&endPeriod={end_period}"
         try:
-            with urlopen(url, timeout=30) as response:
-                latest_data_upload = parse_upload_date(response.headers.get("Last-Modified"))
-                payload = json.loads(response.read().decode("utf-8"))
+            payload, latest_data_upload = fetch_json(url)
         except Exception as exc:
             latest_error = f"IMF request failed: {exc}"
             continue
@@ -560,9 +625,7 @@ def fetch_world_bank_headline_series(country_code, spec):
         f"?format=json&date={start_year}:{end_year}&per_page=200"
     )
 
-    with urlopen(url, timeout=30) as response:
-        latest_data_upload = parse_upload_date(response.headers.get("Last-Modified"))
-        payload = json.loads(response.read().decode("utf-8"))
+    payload, latest_data_upload = fetch_json(url)
 
     observations = payload[1] if isinstance(payload, list) and len(payload) > 1 else []
     records = []
@@ -583,6 +646,46 @@ def fetch_world_bank_headline_series(country_code, spec):
     data["value"] = pd.to_numeric(data["value"], errors="coerce")
     data = data[data["date"] >= START_DATE].dropna(subset=["date", "value"])
     return data[["date", "value"]].sort_values("date"), latest_data_upload, "ok"
+
+
+def official_headline_release_frame(country_name):
+    releases = OFFICIAL_HEADLINE_RELEASES.get(country_name, [])
+    if not releases:
+        return pd.DataFrame()
+
+    frame = pd.DataFrame(releases)
+    frame["date"] = pd.to_datetime(frame["date"])
+    frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
+    frame["latest_data_upload"] = frame["date"]
+    return frame.dropna(subset=["date", "value"])
+
+
+def enrich_with_official_headline_releases(country_name, spec, long):
+    if spec["factor"] != "headline":
+        return long
+
+    release_frame = official_headline_release_frame(country_name)
+    if release_frame.empty:
+        return long
+
+    release_frame["country"] = country_name
+    release_frame["geo"] = COUNTRIES[country_name]
+    release_frame["factor"] = spec["factor"]
+    release_frame["factor_label"] = spec["factor_label"]
+    release_frame["coicop"] = spec["coicop"]
+    release_frame["coicop18"] = spec["coicop18"]
+
+    if long.empty:
+        return release_frame
+
+    combined = pd.concat([long, release_frame], ignore_index=True)
+    combined["date"] = pd.to_datetime(combined["date"])
+    combined = (
+        combined.sort_values(["date", "source"])
+        .drop_duplicates(subset=["date"], keep="last")
+        .sort_values("date")
+    )
+    return combined
 
 
 def calculate_yoy_from_index(records):
@@ -608,6 +711,18 @@ def flatten_singstat_rows(rows):
     return flattened
 
 
+def flatten_singstat_columns(columns):
+    if isinstance(columns, dict):
+        columns = [columns]
+
+    flattened = []
+    for column in columns or []:
+        if "value" in column:
+            flattened.append(column)
+        flattened.extend(flatten_singstat_columns(column.get("columns")))
+    return flattened
+
+
 def singstat_row_matches(row_text, patterns):
     normalized = str(row_text).lower()
     return any(pattern in normalized for pattern in patterns)
@@ -616,9 +731,7 @@ def singstat_row_matches(row_text, patterns):
 @functools.lru_cache(maxsize=16)
 def fetch_singstat_table(cache_hour):
     url = f"{SINGSTAT_API_BASE}/{SINGSTAT_CPI_RESOURCE_ID}?limit=5000"
-    with urlopen(url, timeout=30) as response:
-        latest_data_upload = parse_upload_date(response.headers.get("Last-Modified"))
-        payload = json.loads(response.read().decode("utf-8"))
+    payload, latest_data_upload = fetch_json(url)
 
     payload_upload = parse_calendar_date(payload.get("Data", {}).get("dataLastUpdated"))
     if not pd.isna(payload_upload):
@@ -637,19 +750,27 @@ def fetch_singapore_official_series(spec, cache_hour):
 
     payload, latest_data_upload, rows = fetch_singstat_table(cache_hour)
     matched_row = None
-    for row in flatten_singstat_rows(rows):
+    flattened_rows = flatten_singstat_rows(rows)
+    for row in flattened_rows:
         row_text = row.get("rowText") or row.get("rowTitle") or row.get("name")
         if singstat_row_matches(row_text, patterns):
             matched_row = row
             break
 
+    if matched_row is None and spec["factor"] == "headline":
+        for row in flattened_rows:
+            row_text = row.get("rowText") or row.get("rowTitle") or row.get("name")
+            if "all" in str(row_text).lower() and "item" in str(row_text).lower():
+                matched_row = row
+                break
+
     if not matched_row:
         return pd.DataFrame(), latest_data_upload, "not available from SingStat CPI source", None
 
     records = []
-    columns = matched_row.get("columns", []) or matched_row.get("column", [])
-    if isinstance(columns, dict):
-        columns = [columns]
+    columns = flatten_singstat_columns(
+        matched_row.get("columns", []) or matched_row.get("column", [])
+    )
 
     for column in columns:
         date_value = parse_month_text(column.get("key") or column.get("name"))
@@ -683,9 +804,7 @@ def fetch_thailand_moc_series(spec):
     params = urlencode(params_dict)
     url = f"{THAILAND_MOC_API_BASE}/{config['endpoint']}?{params}"
 
-    with urlopen(url, timeout=30) as response:
-        latest_data_upload = parse_upload_date(response.headers.get("Last-Modified"))
-        payload = json.loads(response.read().decode("utf-8"))
+    payload, latest_data_upload = fetch_json(url)
 
     if isinstance(payload, list):
         rows = payload
@@ -925,6 +1044,20 @@ def load_data(selected_countries, cache_day):
                 df, status = get_local_official_series(country_name, geo, spec, cache_day)
             else:
                 df, status = get_imf_series(country_name, geo, spec)
+
+            if country_name in OFFICIAL_HEADLINE_RELEASES and spec["factor"] == "headline":
+                df = enrich_with_official_headline_releases(country_name, spec, df)
+                if not df.empty:
+                    status = build_status(
+                        country_name,
+                        {**spec, "indicator": df["indicator"].iloc[-1]},
+                        "ok",
+                        len(df),
+                        df["date"].min(),
+                        df["date"].max(),
+                        df["latest_data_upload"].max(),
+                    )
+
             statuses.append(status)
             if not df.empty:
                 frames.append(df)
@@ -1215,7 +1348,7 @@ def generated_chart_insight_html(chart_df, factor):
     if sub.empty:
         return """
         <div class="chart-insight">
-            <strong>Insight</strong>
+            <strong>Insights</strong>
             <p>No data is available for this chart in the selected range.</p>
         </div>
         """
@@ -1256,18 +1389,15 @@ def generated_chart_insight_html(chart_df, factor):
 
         insights.append(
             "<li>"
-            f"<strong>{escape(str(country))}</strong>: "
-            f"{label} for {lens}. "
-            f"The latest reading is {latest_value:.2f}% in {latest_date.strftime('%B %Y')}, "
-            f"{describe_direction(monthly_delta)} vs the previous month and "
-            f"{describe_direction(trailing_delta)} over the last available 12-month window. "
-            f"{implication}"
+            f"<strong>{escape(str(country))}</strong> - "
+            f"{label} for {lens}: {latest_value:.2f}% in {latest_date.strftime('%B %Y')}, "
+            f"{describe_direction(monthly_delta)} vs prior month. {implication}"
             "</li>"
         )
 
     return f"""
     <div class="chart-insight">
-        <strong>Insight</strong>
+        <strong>Insights</strong>
         <ul>{"".join(insights)}</ul>
     </div>
     """
@@ -1279,7 +1409,7 @@ def chart_insight_html(chart_df, factor, generate_insights):
 
     return """
     <div class="chart-insight">
-        <strong>Insight</strong>
+        <strong>Insights</strong>
         <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Integer facilisis, justo at dictum varius, lorem arcu porta mi, vitae luctus massa neque at neque.</p>
     </div>
     """
@@ -1682,9 +1812,9 @@ def index():
                     --accent: #d71920;
                     --accent-dark: #a80f17;
                     --accent-soft: #ffe3e4;
-                    --selector-blue: #1769aa;
-                    --selector-blue-soft: #e8f2fb;
-                    --selector-blue-line: #9fc8ea;
+                    --selector-red: #d71920;
+                    --selector-red-soft: #fff0f1;
+                    --selector-red-line: #f0b8bb;
                 }}
                 * {{ box-sizing: border-box; }}
                 html {{
@@ -1755,14 +1885,14 @@ def index():
                     gap: 8px;
                     margin: 7px 0;
                     padding: 7px 9px;
-                    color: #14395f;
-                    background: var(--selector-blue-soft);
-                    border: 1px solid var(--selector-blue-line);
+                    color: var(--accent-dark);
+                    background: var(--selector-red-soft);
+                    border: 1px solid var(--selector-red-line);
                     border-radius: 6px;
                     font-weight: 600;
                 }}
                 .check input {{
-                    accent-color: var(--selector-blue);
+                    accent-color: var(--selector-red);
                 }}
                 select, button {{
                     width: 100%;
